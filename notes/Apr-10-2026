@@ -1,0 +1,13 @@
+Face Re-Id Problems..
+
+
+The problem is to match the person in query to the gallery images. 
+For this we need to perform metric learning where each person needs to be embed in an embedding space that is made of features that are helpful in distinguishing the person.
+I think its all about the loss term employed for organizing the latent space.
+Might be useful to take a bunch of people and see how the loss space is organized or clustred by using PcA or tsne or some other dim reducition technique..
+
+To do:
+1- Read the problem again and come up with a comprehensive plan for the problem solution.
+2- Set up the notebook and exp directory for a rough structure for the problem
+3- Read the papers that were attached with it.
+

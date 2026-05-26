@@ -1,0 +1,57 @@
+Person Re-id problem:
+
+1- Detection:
+	Given a frame, detect all people.
+
+2- Match that person to a gallery of images in feature space.
+	-> The gallery itself is extracted from running detection and getting all crops.
+	
+PIPELINE 01:
+
+1- Seperare pipeline:
+
+	-> Train detector, eg: YOLO, Faster R-CNN
+	-> Run detector on images to get person crops. Note the mAP or some other metric to see how good detections are.
+	-> Train Re-ID model on crops -> metric learning.
+	-> At inference time, you just detect, embed and do nearest neighbour search.
+
+PIPELINE 02:
+
+2- Joint Training:
+	
+	-> The architecure is a shared backbone, Region Proposal Network, ROI, ROI align, detection head + ReID head.
+	-> detection loss (bbox coord + classification) + ReID loss (triplet etc.)
+	-> Joint backprop
+
+For now we start with Pipeline 01 to get a baseline model. Today we plan to implement a detection pipeline.
+
+
+
+
+
+
+PIPELINE 01 Details:
+
+1- YOLO-Based Detection:
+    1-  We use yolo to see how well the detections are. We use yolo to get the bbox prediction , confidence scores and class label. 
+    2-  Once we have all the detections , we can plot a Precison-Recall Curve, the flatter it remains the better. We sort all predictions by confidence (high -> low) and we sweep through this ranked list where at each step we compute precisiona nd recall. This means that PR curve is obtianed by varying confidence threshold implicitly thorugh rnaking.
+        higher recall -> low confidence region included.
+        lower recall -> high confidence region only.
+
+    3- We calculate Average Precision by ranking all the predictions according to confidence threshold, where each preiction is TP if
+        -> correct class = Person
+        -> IOU >= threshold
+        -> matched to an unmatched gt box
+
+        else its a FP.
+    
+    4- This can then be repeated at multiple levels of IoU so eg COCO style mAP@0.5:0.95 
+
+
+I would like a df as such:
+
+img_path                        GT                  Predictions
+
+xyz.jpg         {person_1:[ . . . .] ,          {prediction_1:{bbox = [ . . . .], confidence: "" , class_label : ""} ,
+                 person_2:[. . . . ] ,          predictions_2:{bbox = [ . . . .], confidence: "" , class_label : ""}
+                 ...}                             ...}
