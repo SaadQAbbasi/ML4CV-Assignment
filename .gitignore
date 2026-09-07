@@ -1,3 +1,9 @@
 # ignore the archive folder
 archive/
 data/
+.venv/
+__pycache__/
+wandb/
+checkpoints/
+artifacts/
+.ipynb_checkpoints/

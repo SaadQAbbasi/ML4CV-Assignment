@@ -1,0 +1,9 @@
+# Install CUDA PyTorch first; see TRAINING.md.
+torch==2.11.0
+torchvision==0.26.0
+wandb>=0.21,<1
+matplotlib>=3.10,<4
+scipy>=1.16,<2
+ipykernel>=6.30,<8
+nbclient>=0.10,<1
+nbformat>=5.10,<6

@@ -7,7 +7,7 @@ Goal of this file (Step 05 of the pipeline, triplet/contrastive variant):
 Per the updated pipeline decision: use DETECTOR-GENERATED positive RoIs
 (not GT crops) as the ReID head's input, with GT providing the identity
 label via IoU match -- this is exactly what ROITargetAssigner in
-roi_heads.py already produces (embeddings from DetectionHead, matched_gt_ids
+roi_heads.py already produces (embeddings from ReIDHead, matched_gt_ids
 per RoI). This file's only job is: take those, filter correctly, and turn
 them into a loss.
 
@@ -63,8 +63,8 @@ class BatchHardTripletLoss(nn.Module):
     Batch-hard (vs. naively enumerating all triplets) focuses gradient on
     the actually-confusing examples and is the standard choice for ReID.
 
-    Embeddings are assumed already L2-normalized (DetectionHead does this),
-    so squared Euclidean distance is used, bounded in [0, 4].
+    Embeddings are assumed already L2-normalized (ReIDHead does this).
+    Euclidean distance is used, bounded in [0, 2].
     """
 
     def __init__(self, margin: float = 0.3):
@@ -86,7 +86,7 @@ class BatchHardTripletLoss(nn.Module):
         if n < 2:
             return embeddings.sum() * 0.0, {"valid_anchors": 0, "total_anchors": n}
 
-        dist = torch.cdist(embeddings, embeddings, p=2)  # (n, n) pairwise distances
+        dist = torch.cdist(embeddings.float(), embeddings.float(), p=2)  # (n, n) pairwise distances
 
         same_id = ids.unsqueeze(0) == ids.unsqueeze(1)          # (n, n)
         diff_id = ~same_id
@@ -111,7 +111,10 @@ class BatchHardTripletLoss(nn.Module):
         losses = F.relu(self.margin + hardest_pos - hardest_neg)
         loss = losses[valid].mean()
 
-        return loss, {"valid_anchors": int(valid.sum()), "total_anchors": n}
+        return loss, {"valid_anchors": int(valid.sum()), "total_anchors": n,
+                      "active_fraction": float((losses[valid] > 0).float().mean().detach()),
+                      "hardest_positive_distance": float(hardest_pos[valid].mean().detach()),
+                      "hardest_negative_distance": float(hardest_neg[valid].mean().detach())}
 
 
 class ContrastiveLoss(nn.Module):
@@ -133,7 +136,7 @@ class ContrastiveLoss(nn.Module):
         if n < 2:
             return embeddings.sum() * 0.0, {"num_pairs": 0}
 
-        dist = torch.cdist(embeddings, embeddings, p=2)
+        dist = torch.cdist(embeddings.float(), embeddings.float(), p=2)
         same_id = ids.unsqueeze(0) == ids.unsqueeze(1)
         not_self = ~torch.eye(n, dtype=torch.bool, device=embeddings.device)
 

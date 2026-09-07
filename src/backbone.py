@@ -88,17 +88,16 @@ class ResNetBackbone(Backbone):
             raise ValueError(f"Unknown resnet variant '{name}'. "
                               f"Choose from {list(self._CHANNELS)}")
 
-        weights = "IMAGENET1K_V2" if pretrained else None
-        try:
-            net = torchvision.models.get_model(name, weights=weights)
-        except Exception:
-            # older torchvision versions
-            net = getattr(torchvision.models, name)(pretrained=pretrained)
+        weights = torchvision.models.get_model_weights(name).DEFAULT if pretrained else None
+        net = torchvision.models.get_model(name, weights=weights)
+        self.frozen_bn = frozen_bn
 
         if frozen_bn:
             net = self._freeze_batchnorm(net)
 
         self._set_trainable_layers(net, trainable_layers)
+        if frozen_bn:
+            self._freeze_batchnorm(net)
 
         return_layers = {"layer1": "C2", "layer2": "C3",
                           "layer3": "C4", "layer4": "C5"}
@@ -107,6 +106,12 @@ class ResNetBackbone(Backbone):
         self.out_levels = ["C2", "C3", "C4", "C5"]
         self.out_channels = self._CHANNELS[name]
         self.out_strides = [4, 8, 16, 32]
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        if self.frozen_bn:
+            self._freeze_batchnorm(self)
+        return self
 
     @staticmethod
     def _freeze_batchnorm(net: nn.Module) -> nn.Module:

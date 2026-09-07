@@ -45,7 +45,8 @@ from rpn import (build_anchor_generator, RPNHead, RPNTargetAssigner, compute_rpn
                   RPN_BATCH_SIZE_PER_IMAGE, RPN_POSITIVE_FRACTION)
 from roi_heads import (build_roi_pooler, DetectionHead, ReIDHead, ROITargetAssigner,
                         compute_detection_loss, postprocess_detections, ROI_ALIGN_OUTPUT_SIZE)
-from metric_loss import filter_labeled_roIs, BatchHardTripletLoss
+from metric_loss import BatchHardTripletLoss, ContrastiveLoss
+from torchvision.ops import box_iou
 
 
 class PersonSearchModel(nn.Module):
@@ -53,21 +54,28 @@ class PersonSearchModel(nn.Module):
     def __init__(self, backbone_name: str = "resnet50", pretrained: bool = True,
                  fpn_out_channels: int = 256, embedding_dim: int = 256,
                  triplet_margin: float = 0.3,
+                 metric_loss: str = "triplet",
                  rpn_pre_nms_top_n_train: int = 2000, rpn_post_nms_top_n_train: int = 2000,
                  rpn_pre_nms_top_n_test: int = 1000, rpn_post_nms_top_n_test: int = 300,
                  rpn_nms_thresh: float = 0.7,
                  det_score_thresh: float = 0.5, det_nms_thresh: float = 0.4,
-                 det_max_detections: int = 100):
+                 det_max_detections: int = 100,
+                 anchor_sizes=((16,), (32,), (64,), (128,)),
+                 anchor_ratios=((2.0, 3.0, 4.0),) * 4,
+                 rpn_fg_iou_thresh: float = 0.7, rpn_bg_iou_thresh: float = 0.3,
+                 roi_fg_iou_thresh: float = 0.7, roi_bg_iou_thresh: float = 0.3):
         super().__init__()
 
         self.backbone, self.fpn = build_backbone_with_fpn(
-            backbone_name, fpn_out_channels=fpn_out_channels, pretrained=pretrained
+            backbone_name, fpn_out_channels=fpn_out_channels, pretrained=pretrained, add_p6=False
         )
-        self.anchor_gen = build_anchor_generator()
+        self.anchor_gen = build_anchor_generator(anchor_sizes, anchor_ratios)
+        if len(anchor_sizes) != len(self.fpn.out_levels):
+            raise ValueError("Provide one anchor-size and ratio tuple per FPN level (P2–P5)")
         num_anchors = self.anchor_gen.num_anchors_per_location()
         assert len(set(num_anchors)) == 1, "RPNHead assumes equal anchor count per level"
         self.rpn_head = RPNHead(in_channels=fpn_out_channels, num_anchors=num_anchors[0])
-        self.rpn_assigner = RPNTargetAssigner()
+        self.rpn_assigner = RPNTargetAssigner(rpn_fg_iou_thresh, rpn_bg_iou_thresh)
         self.rpn_sampler = BalancedPositiveNegativeSampler(RPN_BATCH_SIZE_PER_IMAGE, RPN_POSITIVE_FRACTION)
 
         self.roi_pooler = build_roi_pooler()
@@ -76,9 +84,13 @@ class PersonSearchModel(nn.Module):
         # one head with an embedding branch grafted onto it. See roi_heads.py.
         self.det_head = DetectionHead(in_channels=fpn_out_channels)
         self.reid_head = ReIDHead(in_channels=fpn_out_channels, embedding_dim=embedding_dim)
-        self.roi_assigner = ROITargetAssigner()
-
-        self.triplet_loss = BatchHardTripletLoss(margin=triplet_margin)
+        self.roi_assigner = ROITargetAssigner(roi_fg_iou_thresh, roi_bg_iou_thresh)
+        if metric_loss == "triplet":
+            self.metric_loss_fn = BatchHardTripletLoss(margin=triplet_margin)
+        elif metric_loss == "contrastive":
+            self.metric_loss_fn = ContrastiveLoss(margin=1.0)
+        else:
+            raise ValueError("metric_loss must be 'triplet' or 'contrastive'")
 
         self.box_coder = BoxCoder(weights=BOX_CODER_WEIGHTS)
 
@@ -96,7 +108,7 @@ class PersonSearchModel(nn.Module):
     def _extract_pyramid(self, images: torch.Tensor):
         c_feats = self.backbone(images)
         p_feats_dict = self.fpn(c_feats)
-        p_feats_list = [p_feats_dict[lvl] for lvl in self.fpn.out_levels]     # ordered P2..P6
+        p_feats_list = [p_feats_dict[lvl] for lvl in self.fpn.out_levels]     # ordered P2..P5
         p_feats_roi = {lvl: p_feats_dict[lvl] for lvl in ("P2", "P3", "P4", "P5")}  # P6 excluded, see roi_heads.py
         return p_feats_dict, p_feats_list, p_feats_roi
 
@@ -132,18 +144,19 @@ class PersonSearchModel(nn.Module):
             pre_nms_top_n=self.rpn_pre_nms_top_n_train, post_nms_top_n=self.rpn_post_nms_top_n_train,
             nms_thresh=self.rpn_nms_thresh
         )
-        proposals = self.roi_assigner.add_gt_proposals(proposals, gt_boxes_per_image)
+        # Match detector-generated proposals only; never inject GT boxes.
 
         sampled_props, cls_labels, matched_gt_boxes, matched_gt_ids = self.roi_assigner.assign_and_sample(
             proposals, gt_boxes_per_image, gt_ids_per_image
         )
 
-        pooled = self.roi_pooler(p_feats_roi, sampled_props, image_shapes)
+        # torchvision RoI pooling uses FP32 even when backbone/FPN use BF16.
+        with torch.autocast(images.device.type, enabled=False):
+            pooled = self.roi_pooler({k: v.float() for k, v in p_feats_roi.items()},
+                                     sampled_props, image_shapes)
         # both heads read the SAME pooled features independently (diagram: two
         # parallel boxes off RoI Align), not one head feeding the other
         cls_logits, det_bbox_deltas = self.det_head(pooled)
-        embeddings = self.reid_head(pooled)
-
         flat_cls_labels = torch.cat(cls_labels)
         flat_matched_boxes = torch.cat(matched_gt_boxes)
         flat_matched_ids = torch.cat(matched_gt_ids)
@@ -156,8 +169,16 @@ class PersonSearchModel(nn.Module):
         )
 
         # --- metric loss ---
-        filt_emb, filt_ids = filter_labeled_roIs(embeddings, flat_cls_labels, flat_matched_ids)
-        metric_loss, metric_stats = self.triplet_loss(filt_emb, filt_ids)
+        reid_keep = (flat_cls_labels == 1) & (flat_matched_ids >= 0)
+        filt_emb = self.reid_head(pooled[reid_keep])
+        filt_ids = flat_matched_ids[reid_keep]
+        metric_loss, metric_stats = self.metric_loss_fn(filt_emb, filt_ids)
+        with torch.no_grad():
+            gt_count = sum(len(b) for b in gt_boxes_per_image)
+            recalled = sum(
+                int((box_iou(gt, props).max(dim=1).values >= 0.5).sum())
+                for gt, props in zip(gt_boxes_per_image, proposals) if len(gt) and len(props)
+            )
 
         return {
             "rpn_objectness_loss": rpn_obj_loss,
@@ -167,7 +188,17 @@ class PersonSearchModel(nn.Module):
             "metric_loss": metric_loss,
             # not a loss, but useful to log alongside the losses so a
             # collapsing metric_loss can be diagnosed (see module docstring)
-            "_metric_valid_anchors": torch.tensor(float(metric_stats.get("valid_anchors", 0))),
+            "_metric_active_fraction": images.new_tensor(metric_stats.get("active_fraction", 0.0)),
+            "_hardest_positive_distance": images.new_tensor(metric_stats.get("hardest_positive_distance", 0.0)),
+            "_hardest_negative_distance": images.new_tensor(metric_stats.get("hardest_negative_distance", 0.0)),
+            "_rpn_positive_anchors": sum((labels == 1).sum() for labels in rpn_labels).detach(),
+            "_proposals": images.new_tensor(sum(len(p) for p in proposals)),
+            "_positive_rois": (flat_cls_labels == 1).sum().detach(),
+            "_labeled_rois": reid_keep.sum().detach(),
+            "_reid_identities": images.new_tensor(filt_ids.unique().numel()),
+            "_proposal_recall_iou50": images.new_tensor(recalled / max(gt_count, 1)),
+            "_gt_persons": images.new_tensor(gt_count),
+            "_metric_valid_anchors": images.new_tensor(float(metric_stats.get("valid_anchors", 0))),
         }
 
     # ------------------------------------------------------------------ #

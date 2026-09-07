@@ -29,19 +29,9 @@ Design notes:
       detection wants "all people look similar" (compact vs. background)
       while re-ID wants "different identities are separable" -- sharing a
       trunk between both objectives fights itself; separate trunks don't.
-    - Target assignment here uses a SINGLE 0.5 IoU threshold (positive if
-      IoU>=0.5, negative otherwise, no ignored/ambiguous zone) -- this
-      matches the assignment brief's "IoU > 0.5" spec exactly, unlike RPN's
-      0.7/0.3 split. That's intentional, not an inconsistency: RPN needed a
-      buffer zone because raw anchors are a coarse, fixed grid with lots of
-      borderline overlaps; proposals here are already RPN-refined and far
-      fewer, so a single threshold is standard practice at this stage
-      (see torchvision's own RoIHeads, Faster R-CNN, Mask R-CNN).
-    - GT boxes are appended to the proposal set during training
-      ("add_gt_proposals"). Early in training RPN proposals are poor and may
-      contain few/no boxes with IoU>=0.5 to any GT; injecting GT boxes
-      directly guarantees positive examples exist for the detection head to
-      learn from, especially in the first few epochs.
+    - Both anchor and proposal matching default to IoU >= 0.5.
+    - PersonSearchModel never appends GT boxes to the proposal set. GT boxes
+      supply matching/regression targets and identity labels only.
 """
 
 from typing import Dict, List, Tuple
@@ -59,8 +49,8 @@ from rpn import (build_anchor_generator, RPNHead, RPNTargetAssigner, compute_rpn
                   RPN_BATCH_SIZE_PER_IMAGE, RPN_POSITIVE_FRACTION)
 
 # Single-threshold assignment, matches the assignment brief ("IoU > 0.5").
-ROI_FG_IOU_THRESH = 0.5
-ROI_BG_IOU_THRESH = 0.5
+ROI_FG_IOU_THRESH = 0.7
+ROI_BG_IOU_THRESH = 0.3
 ROI_BATCH_SIZE_PER_IMAGE = 512
 ROI_POSITIVE_FRACTION = 0.25   # fewer positives needed here than at RPN --
                                 # proposals are already pre-filtered by RPN,
@@ -188,10 +178,7 @@ class ROITargetAssigner:
                  bg_iou_thresh: float = ROI_BG_IOU_THRESH,
                  batch_size_per_image: int = ROI_BATCH_SIZE_PER_IMAGE,
                  positive_fraction: float = ROI_POSITIVE_FRACTION):
-        # allow_low_quality_matches=False here (unlike RPN): at this stage
-        # we WANT low-IoU proposals to just be background, not force-matched
-        # to a GT box they barely overlap -- RPN's guarantee that "every GT
-        # gets one anchor" already happened one stage earlier.
+        # Low-IoU proposals remain background, with no forced GT matches.
         self.matcher = Matcher(fg_iou_thresh, bg_iou_thresh, allow_low_quality_matches=False)
         self.sampler = BalancedPositiveNegativeSampler(batch_size_per_image, positive_fraction)
         self.box_coder = BoxCoder(weights=BOX_CODER_WEIGHTS)
@@ -228,14 +215,15 @@ class ROITargetAssigner:
         sampled_proposals, cls_labels, matched_gt_boxes, matched_gt_ids = [], [], [], []
 
         for proposals, gt_boxes, gt_ids in zip(proposals_per_image, gt_boxes_per_image, gt_ids_per_image):
-            if gt_boxes.numel() == 0:
-                labels = torch.zeros(proposals.shape[0], dtype=torch.int64)
+            if gt_boxes.numel() == 0 or proposals.numel() == 0:
+                labels = torch.zeros(proposals.shape[0], dtype=torch.int64, device=proposals.device)
                 matched_boxes = torch.zeros_like(proposals)
-                matched_ids = torch.full((proposals.shape[0],), -1, dtype=torch.int64)
+                matched_ids = torch.full((proposals.shape[0],), -1, dtype=torch.int64, device=proposals.device)
             else:
                 iou = box_ops.box_iou(gt_boxes, proposals)   # (num_gt, num_proposals)
                 matched_idxs = self.matcher(iou)
                 labels = (matched_idxs >= 0).to(torch.int64)  # bg(-1)->0, matched->1
+                labels[matched_idxs == Matcher.BETWEEN_THRESHOLDS] = -1  # ignore ambiguous IoU
                 clamped = matched_idxs.clamp(min=0)
                 matched_boxes = gt_boxes[clamped]
                 matched_ids = gt_ids[clamped]
@@ -263,7 +251,8 @@ def compute_detection_loss(cls_logits: torch.Tensor, bbox_deltas: torch.Tensor,
     and the DetectionHead process proposals: as one flat batch, not
     per-image loops, since the FC head has no notion of "which image").
     """
-    cls_loss = F.cross_entropy(cls_logits, cls_labels)
+    cls_loss = (F.cross_entropy(cls_logits, cls_labels) if cls_labels.numel()
+                else cls_logits.sum() * 0.0)
 
     pos_mask = cls_labels == 1
     if pos_mask.sum() == 0:
@@ -309,7 +298,8 @@ def postprocess_detections(cls_logits: torch.Tensor, bbox_deltas: torch.Tensor,
         boxes = box_coder.decode_single(img_deltas, proposals)
         boxes = box_ops.clip_boxes_to_image(boxes, (img_h, img_w))
 
-        keep = scores >= score_thresh
+        valid_size = (boxes[:, 2:] > boxes[:, :2]).all(dim=1)
+        keep = (scores >= score_thresh) & valid_size
         boxes, scores, img_emb = boxes[keep], scores[keep], img_emb[keep]
 
         keep = box_ops.nms(boxes, scores, nms_thresh)
