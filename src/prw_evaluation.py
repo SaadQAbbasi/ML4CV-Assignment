@@ -297,18 +297,22 @@ def plot_retrieval_query(records, root, query_index=0, top_k=5):
 
 
 def make_wandb_retrieval_table(records, root):
-    """Create an interactive W&B table for inspecting ranked detections."""
+    """Create one W&B row per query, with saved predictions side by side."""
     root = Path(root)
-    table = wandb.Table(columns=[
-        "query_id", "query_frame", "query", "rank", "similarity",
-        "gallery_frame", "gallery", "predicted_box", "box_xyxy", "same_id_gt_in_frame",
-        "same_id_gt_total", "correct",
-    ])
+    max_predictions = max((len(record["ranked"]) for record in records), default=0)
+    columns = ["query_id", "query_frame", "query", "same_id_gt_total"]
+    prediction_fields = ["predicted_box", "similarity", "correct", "gallery_frame",
+                         "gallery", "box_xyxy", "same_id_gt_in_frame"]
+    for rank in range(1, max_predictions + 1):
+        columns.extend(f"top_{rank}_{field}" for field in prediction_fields)
+    table = wandb.Table(columns=columns)
     rows_added = 0
-    total_rows = sum(len(record["ranked"]) for record in records)
+    total_rows = len(records)
     print(f"W&B retrieval table: preparing {total_rows} rows", flush=True)
     for record in records:
         query_image = wandb.Image(record["query_path"])
+        row = [record["identity"], record["frame"], query_image,
+               record["ground_truth_count"]]
         for item in record["ranked"]:
             box = item["box"]
             prediction_data = [{
@@ -335,11 +339,11 @@ def make_wandb_retrieval_table(records, root):
             with Image.open(root / "frames" / f"{item['frame']}.jpg") as source:
                 predicted_crop = wandb.Image(source.convert("RGB").crop(tuple(box)),
                                             caption=f"Rank {item['rank']} | similarity {item['score']:.3f}")
-            table.add_data(record["identity"], record["frame"], query_image,
-                           item["rank"], item["score"], item["frame"], gallery_image,
-                           predicted_crop, str(box), item["gt_count"],
-                           record["ground_truth_count"], item["correct"])
-            rows_added += 1
-            if rows_added % 50 == 0 or rows_added == total_rows:
-                print(f"W&B retrieval table: prepared {rows_added}/{total_rows} rows", flush=True)
+            row.extend([predicted_crop, item["score"], item["correct"], item["frame"],
+                        gallery_image, str(box), item["gt_count"]])
+        row.extend([None] * (len(columns) - len(row)))
+        table.add_data(*row)
+        rows_added += 1
+        if rows_added % 50 == 0 or rows_added == total_rows:
+            print(f"W&B retrieval table: prepared {rows_added}/{total_rows} rows", flush=True)
     return table
