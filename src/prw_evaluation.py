@@ -222,7 +222,8 @@ def evaluate_prw(model, root, device, batch_size=2, max_queries=None, max_galler
                 if return_records and len(records) < table_queries:
                     positive_rank_set = set(positive_rank_indices)
                     ranked = []
-                    for rank, detection_index in enumerate(order[:table_top_k].cpu().tolist(), start=1):
+                    valid_order = order[valid[order]]
+                    for rank, detection_index in enumerate(valid_order[:table_top_k].cpu().tolist(), start=1):
                         frame = gallery[detection_frames[detection_index].item()]["frame"]
                         gt_boxes = frame_gt_boxes.get((frame, identity), torch.empty((0, 4)))
                         ranked.append({
@@ -252,12 +253,55 @@ def evaluate_prw(model, root, device, batch_size=2, max_queries=None, max_galler
     return metrics
 
 
+def plot_retrieval_query(records, root, query_index=0, top_k=5):
+    """Show a query crop, ranked detection crops, and their gallery locations.
+
+    ``query_index`` selects a saved retrieval record; no model inference is needed.
+    Green/red indicates evaluation correctness, not a model confidence threshold.
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Rectangle
+
+    if not records:
+        raise ValueError("No retrieval records available. Evaluate with return_records=True.")
+    if top_k < 1:
+        raise ValueError("top_k must be at least 1.")
+    record = records[query_index]
+    ranked = record["ranked"][:top_k]
+    fig, axes = plt.subplots(2, len(ranked) + 1, squeeze=False,
+                             figsize=(3.5 * (len(ranked) + 1), 7))
+    for ax in axes.flat:
+        ax.axis("off")
+    with Image.open(record["query_path"]) as source:
+        axes[0, 0].imshow(source.convert("RGB"))
+    axes[0, 0].set_title(f"Query ID {record['identity']}\n{record['frame']}")
+    axes[1, 0].text(0.5, 0.5,
+                    "Top matches by cosine similarity\nGreen: correct match\nRed: incorrect match"
+                    if ranked else "No gallery detections available",
+                    ha="center", va="center", transform=axes[1, 0].transAxes)
+    for col, item in enumerate(ranked, start=1):
+        with Image.open(Path(root) / "frames" / f"{item['frame']}.jpg") as source:
+            frame = source.convert("RGB")
+        color = "forestgreen" if item["correct"] else "crimson"
+        axes[0, col].imshow(frame.crop(tuple(item["box"])))
+        axes[0, col].set_title(
+            f"Rank {item['rank']} | similarity {item['score']:.3f}\n"
+            f"{'Correct' if item['correct'] else 'Incorrect'}", color=color)
+        axes[1, col].imshow(frame)
+        x1, y1, x2, y2 = item["box"]
+        axes[1, col].add_patch(Rectangle((x1, y1), x2 - x1, y2 - y1,
+                                       fill=False, edgecolor=color, linewidth=2))
+        axes[1, col].set_title(item["frame"])
+    fig.tight_layout()
+    return fig
+
+
 def make_wandb_retrieval_table(records, root):
     """Create an interactive W&B table for inspecting ranked detections."""
     root = Path(root)
     table = wandb.Table(columns=[
         "query_id", "query_frame", "query", "rank", "similarity",
-        "gallery_frame", "gallery", "predicted_box", "same_id_gt_in_frame",
+        "gallery_frame", "gallery", "predicted_box", "box_xyxy", "same_id_gt_in_frame",
         "same_id_gt_total", "correct",
     ])
     rows_added = 0
@@ -288,9 +332,13 @@ def make_wandb_retrieval_table(records, root):
                     "class_labels": {1: "person"},
                 }
             })
+            with Image.open(root / "frames" / f"{item['frame']}.jpg") as source:
+                predicted_crop = wandb.Image(source.convert("RGB").crop(tuple(box)),
+                                            caption=f"Rank {item['rank']} | similarity {item['score']:.3f}")
             table.add_data(record["identity"], record["frame"], query_image,
                            item["rank"], item["score"], item["frame"], gallery_image,
-                           box, item["gt_count"], record["ground_truth_count"], item["correct"])
+                           predicted_crop, str(box), item["gt_count"],
+                           record["ground_truth_count"], item["correct"])
             rows_added += 1
             if rows_added % 50 == 0 or rows_added == total_rows:
                 print(f"W&B retrieval table: prepared {rows_added}/{total_rows} rows", flush=True)
