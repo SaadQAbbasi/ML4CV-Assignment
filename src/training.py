@@ -80,7 +80,7 @@ def train_one_epoch(model, loader, optimizer, device, max_steps=None, log_every=
                      **{f'train/{k.lstrip("_")}': v for k, v in values.items()}})
         if step % log_every == 0:
             print(f'step {start_step + step}: ' + ' | '.join(f'{k}={values[k]:.4f}' for k in LOSS_KEYS)
-                  + f' | valid_triplets={values["_metric_valid_anchors"]:.0f}'
+                  + f' | valid_reid_anchors={values["_metric_valid_anchors"]:.0f}'
                   + f' | peak_MB={values["gpu_peak_allocated_mb"]:.0f}', flush=True)
     return history
 

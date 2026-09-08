@@ -1,31 +1,8 @@
-"""
-metric_loss.py
+"""Identity losses and cross-image crop-to-scene supervision.
 
-Goal of this file (Step 05 of the pipeline, triplet/contrastive variant):
-    (RoI embeddings, identity labels) -> a single scalar metric loss
-
-Per the updated pipeline decision: use DETECTOR-GENERATED positive RoIs
-(not GT crops) as the ReID head's input, with GT providing the identity
-label via IoU match -- this is exactly what ROITargetAssigner in
-roi_heads.py already produces (embeddings from ReIDHead, matched_gt_ids
-per RoI). This file's only job is: take those, filter correctly, and turn
-them into a loss.
-
-CRITICAL filtering step (this is the part that's easy to get subtly wrong):
-    ROITargetAssigner's matched_gt_ids has THREE possible situations per RoI:
-        - cls_label == 0                    -> background, no identity at all
-        - cls_label == 1, matched_gt_id == -1  -> a REAL person, but their GT
-                                                   box has no ID annotation
-                                                   (normal in CUHK-SYSU/PRW --
-                                                   not every person is ID-labeled)
-        - cls_label == 1, matched_gt_id >= 0   -> a real, ID-labeled person
-
-    Only the third case may be used in the metric loss. The first two must
-    be dropped entirely -- NOT treated as a generic "negative" class, or
-    unlabeled real people silently corrupt the embedding by being pushed
-    away from every identity indiscriminately, even people they might
-    actually resemble. This is the same failure mode that motivated OIM;
-    we're avoiding it here by strict filtering instead of OIM's queue.
+PersonSearchModel uses cross_image_reid_loss on labeled GT scene regions
+and standalone crops. Same-source positives are excluded. The standalone
+triplet/contrastive modules remain available for embedding-only checks.
 """
 
 from typing import Tuple
@@ -202,3 +179,48 @@ if __name__ == "__main__":
     e_loss, e_stats = triplet(empty_emb, empty_ids)
     print(f"\n[Empty case] no labeled RoIs at all -> loss={e_loss.item():.4f} "
           f"stats={e_stats} (must not crash)")
+
+
+def cross_image_reid_loss(scene, crops, ids, image_ids, loss_fn):
+    """Cross-path pairs: positives must share identity but not source image.
+
+    Negatives are different identities. Same-occurrence crop/scene pairs are
+    excluded rather than accidentally treated as negatives. Both branches
+    receive gradients. Contrastive positive and negative groups are balanced.
+    """
+    zero = (scene.sum() + crops.sum()) * 0.0
+    stats = dict(num_pos_pairs=0, num_neg_pairs=0, valid_anchors=0,
+                 active_fraction=0., hardest_positive_distance=0.,
+                 hardest_negative_distance=0., cross_image_identities=0)
+    if not len(ids):
+        return zero, stats
+    distances = torch.cdist(crops.float(), scene.float())
+    same = ids[:, None] == ids[None, :]
+    positive = same & (image_ids[:, None] != image_ids[None, :])
+    negative = ~same
+    valid = positive.any(1) & negative.any(1)
+    stats.update(num_pos_pairs=int(positive.sum()), num_neg_pairs=int(negative.sum()),
+                 valid_anchors=int(valid.sum()),
+                 cross_image_identities=int(ids[positive.any(1)].unique().numel()))
+    if positive.any():
+        stats["hardest_positive_distance"] = float(
+            distances.masked_fill(~positive, -float("inf")).max(1).values[positive.any(1)].mean().detach())
+    if negative.any():
+        stats["hardest_negative_distance"] = float(
+            distances.masked_fill(~negative, float("inf")).min(1).values[negative.any(1)].mean().detach())
+    if isinstance(loss_fn, BatchHardTripletLoss):
+        if not valid.any():
+            return zero, stats
+        hardest_pos = distances.masked_fill(~positive, -float("inf")).max(1).values[valid]
+        hardest_neg = distances.masked_fill(~negative, float("inf")).min(1).values[valid]
+        losses = F.relu(loss_fn.margin + hardest_pos - hardest_neg)
+        stats["active_fraction"] = float((losses > 0).float().mean().detach())
+        return losses.mean(), stats
+    groups = []
+    if positive.any():
+        groups.append(distances[positive].square().mean())
+    if negative.any():
+        negative_losses = F.relu(loss_fn.margin - distances[negative]).square()
+        groups.append(negative_losses.mean())
+        stats["active_fraction"] = float((negative_losses > 0).float().mean().detach())
+    return (torch.stack(groups).mean() if groups else zero), stats

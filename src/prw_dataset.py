@@ -15,6 +15,16 @@ from torch.utils.data import Dataset, Sampler
 from torchvision.transforms.functional import normalize, pil_to_tensor, resize
 
 
+QUERY_CROP_SIZE = (128, 64)
+
+
+def preprocess_query_crop(image):
+    """Shared training/query preprocessing for an arbitrary-size RGB PIL crop."""
+    tensor = pil_to_tensor(image.convert("RGB")).float() / 255.0
+    return normalize(resize(tensor, list(QUERY_CROP_SIZE)),
+                     (.485, .456, .406), (.229, .224, .225))
+
+
 def _mat_strings(value) -> List[str]:
     """Flatten MATLAB string/object arrays into Python strings."""
     array = np.asarray(value)
@@ -120,6 +130,16 @@ class PRWPersonSearchDataset(Dataset):
         image = pil_to_tensor(raw).float() / 255.0
         _, h, w = image.shape
         target = self._load_target(name, (h, w))
+        # Crop original-resolution pixels, before full-scene downsampling.
+        annotation = _load_mat_table(self.annotations_dir / f"{name}.jpg.mat")
+        original_boxes = _annotation_boxes(annotation)
+        valid = (original_boxes[:, 2:] > original_boxes[:, :2]).all(dim=1)
+        original_boxes = original_boxes[valid]
+        crops = [preprocess_query_crop(raw.crop(tuple(box.tolist())))
+                 for box, identity in zip(original_boxes, target["ids"]) if identity >= 0]
+        target["query_crops"] = (torch.stack(crops) if crops else
+                                 torch.empty((0, 3, *QUERY_CROP_SIZE)))
+        target["image_id"] = torch.tensor(idx, dtype=torch.long)
         return self._load_image(name), target
 
     def identity_to_indices(self):

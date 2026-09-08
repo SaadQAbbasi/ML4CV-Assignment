@@ -1,37 +1,10 @@
-"""
-roi_heads.py
+"""RoI pooling, detection refinement, and identity embedding heads.
 
-Goal of this file (Steps 03-04 of the pipeline):
-    RPN proposals + {P2,P3,P4,P5} -> ROIAlign -> per-proposal embeddings
-    -> detection head -> refined person/bg score + bbox -> final NMS
-
-This is the second detection stage: RPN's job (rpn.py) was "is there
-probably a person somewhere near this anchor" using a shared, coarse head
-applied identically everywhere. This stage's job is "look closely at each
-specific proposed region and decide for real" -- a proposal-specific FC head
-looking at pooled, fixed-size features, which is strictly more accurate.
-
-Design notes:
-    - MultiScaleRoIAlign (torchvision) is reused rather than hand-rolling
-      the FPN-level-assignment formula (Eq. 1 in the FPN paper: which
-      pyramid level a given proposal should be pooled from, based on the
-      proposal's area) -- same "reuse well-tested geometry, write the
-      person-search-specific logic ourselves" philosophy as rpn.py.
-    - Only P2-P5 are used for ROI pooling, NOT P6. P6 exists purely to give
-      RPN one extra coarse anchor scale for very large objects; standard
-      Faster-RCNN-FPN/Mask-RCNN practice excludes it from the box head.
-    - DetectionHead and ReIDHead are TWO SEPARATE modules, each with their
-      own FC trunk, both reading the same pooled RoIAlign output
-      independently and in parallel (matches the pipeline diagram exactly:
-      RoI Align feeds two distinct boxes, "Detection Head" and "ReID head",
-      not one head with a bolted-on embedding branch). This also happens to
-      be the real fix for a tension flagged during pipeline design:
-      detection wants "all people look similar" (compact vs. background)
-      while re-ID wants "different identities are separable" -- sharing a
-      trunk between both objectives fights itself; separate trunks don't.
-    - Both anchor and proposal matching default to IoU >= 0.5.
-    - PersonSearchModel never appends GT boxes to the proposal set. GT boxes
-      supply matching/regression targets and identity labels only.
+Detection pools RPN proposals. PersonSearchModel separately pools labeled
+GT boxes and whole query crops for ReID training, and retained refined
+boxes for gallery ReID inference. All paths use the shared P2-P5 pyramid.
+Proposal matching uses foreground IoU >= 0.7, background IoU < 0.3,
+and ignores the interval between them; detection does not inject GT boxes.
 """
 
 from typing import Dict, List, Tuple
@@ -48,7 +21,7 @@ from rpn import (build_anchor_generator, RPNHead, RPNTargetAssigner, compute_rpn
                   decode_proposals, make_image_list, BOX_CODER_WEIGHTS,
                   RPN_BATCH_SIZE_PER_IMAGE, RPN_POSITIVE_FRACTION)
 
-# Single-threshold assignment, matches the assignment brief ("IoU > 0.5").
+# Foreground/background thresholds with an ignored ambiguous band.
 ROI_FG_IOU_THRESH = 0.7
 ROI_BG_IOU_THRESH = 0.3
 ROI_BATCH_SIZE_PER_IMAGE = 512
@@ -120,19 +93,10 @@ class DetectionHead(nn.Module):
 
 
 class ReIDHead(nn.Module):
-    """
-    Matches the diagram's "ReID head" box exactly: the SAME RoI-Align
-    features feed this head independently, in parallel with DetectionHead
-    -- not sequentially through it. This is a deliberate architectural
-    split, not just a naming change: detection wants "all people look
-    similar" (compact vs. background), re-ID wants "different identities
-    are separable" (spread out). Giving each its own FC trunk (rather than
-    sharing fc6/fc7 and only branching at the last layer, which is what an
-    earlier version of this file did) removes that tension at the
-    representation level, matching what the diagram actually specifies.
+    """Independent FC head mapping pooled regions to normalized embeddings.
 
-    Output feeds Step 05's metric loss (metric_loss.py) -- L2-normalized,
-    since that's what BatchHardTripletLoss/ContrastiveLoss expect.
+    Region sources are GT scene boxes and full crops during training,
+    and refined detection boxes during gallery inference.
     """
 
     def __init__(self, in_channels: int, roi_output_size: int = ROI_ALIGN_OUTPUT_SIZE,
@@ -151,9 +115,7 @@ class ReIDHead(nn.Module):
 
     def forward(self, pooled_feats: torch.Tensor) -> torch.Tensor:
         """
-        pooled_feats: same (N, C, roi_output_size, roi_output_size) input as
-                      DetectionHead gets -- both heads read the SAME RoIAlign
-                      output, per the diagram, not one feeding the other.
+        pooled_feats: (N, C, roi_output_size, roi_output_size) region features.
         returns: embeddings (N, embedding_dim), L2-normalized
         """
         x = pooled_feats.flatten(start_dim=1)
@@ -163,15 +125,13 @@ class ReIDHead(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Target assignment for the detection head (0.5 IoU threshold, per brief)
+# Target assignment for the detection head
 # ---------------------------------------------------------------------------
 
 class ROITargetAssigner:
     """
     Matches proposals to GT person boxes for the detection head's loss.
-    Structurally similar to RPNTargetAssigner but deliberately a SEPARATE
-    class (not shared code) because the threshold semantics differ: RPN
-    ignores an ambiguous band, this stage does not (see module docstring).
+    Uses an ignored ambiguous band and balanced positive/background sampling.
     """
 
     def __init__(self, fg_iou_thresh: float = ROI_FG_IOU_THRESH,

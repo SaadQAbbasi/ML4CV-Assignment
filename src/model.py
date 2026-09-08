@@ -1,36 +1,12 @@
-"""
-model.py
+"""Person search with shared scene/crop identity learning.
 
-Wires every module built so far into a single nn.Module with one entry
-point: PersonSearchModel. Nothing new is implemented here -- this file is
-pure composition, matching how the whole pipeline was scoped from the start
-(backbone.py / fpn.py / rpn.py / roi_heads.py / metric_loss.py each own
-their own logic; this file only owns the ORDER they're called in and how
-their outputs/losses get combined).
+Training returns five losses: RPN objectness/regression, detection
+classification/regression, and cross-image crop-to-GT-scene metric loss.
+Targets contain boxes, ids (-1 for unlabeled), image_id, and query_crops
+(one preprocessed original-resolution crop per labeled GT box, in order).
 
-Two modes, controlled by the standard nn.Module .training flag:
-
-    model.train(); losses = model(images, targets)
-        images:  (B, 3, H, W) tensor, already resized/padded to a common size
-        targets: list[dict], one per image:
-                     {"boxes": (N,4) x1y1x2y2, "ids": (N,) int64,
-                      -1 for GT persons with no identity annotation}
-        returns: dict of 5 scalar losses (caller sums them + .backward())
-
-    model.eval(); results = model(images)
-        returns: list[dict], one per image:
-                     {"boxes": (M,4), "scores": (M,), "embeddings": (M,D)}
-        this is exactly what inference.py will call for building the
-        gallery embeddings AND for the query side (when the query is a
-        full scene image rather than a pre-cropped box -- see model.py's
-        embed_crop() for the pre-cropped-query path, which skips RPN/ROI
-        heads' proposal machinery entirely).
-
-Loss composition (5 terms, matches the pipeline spec exactly):
-    total = rpn_objectness + rpn_bbox + det_cls + det_bbox + metric_loss
-Kept as a dict rather than pre-summed, so train.py/the notebook can log each
-term separately -- if metric_loss stays ~0 while detection losses fall,
-that's the P×K-batch-sampling problem flagged earlier, not a bug in this file.
+Gallery inference refines/filter boxes before a second RoIAlign and ReID.
+Standalone queries use embed_crop with shared backbone/FPN/ReID weights.
 """
 
 from typing import Dict, List, Optional
@@ -45,7 +21,7 @@ from rpn import (build_anchor_generator, RPNHead, RPNTargetAssigner, compute_rpn
                   RPN_BATCH_SIZE_PER_IMAGE, RPN_POSITIVE_FRACTION)
 from roi_heads import (build_roi_pooler, DetectionHead, ReIDHead, ROITargetAssigner,
                         compute_detection_loss, postprocess_detections, ROI_ALIGN_OUTPUT_SIZE)
-from metric_loss import BatchHardTripletLoss, ContrastiveLoss
+from metric_loss import BatchHardTripletLoss, ContrastiveLoss, cross_image_reid_loss
 from torchvision.ops import box_iou
 
 
@@ -79,9 +55,8 @@ class PersonSearchModel(nn.Module):
         self.rpn_sampler = BalancedPositiveNegativeSampler(RPN_BATCH_SIZE_PER_IMAGE, RPN_POSITIVE_FRACTION)
 
         self.roi_pooler = build_roi_pooler()
-        # DetectionHead and ReIDHead are separate modules, per the pipeline
-        # diagram: RoI Align feeds both independently, in parallel -- not
-        # one head with an embedding branch grafted onto it. See roi_heads.py.
+        # Separate heads; ReID uses GT/crop regions in training and refined
+        # detected regions at gallery inference.
         self.det_head = DetectionHead(in_channels=fpn_out_channels)
         self.reid_head = ReIDHead(in_channels=fpn_out_channels, embedding_dim=embedding_dim)
         self.roi_assigner = ROITargetAssigner(roi_fg_iou_thresh, roi_bg_iou_thresh)
@@ -154,8 +129,7 @@ class PersonSearchModel(nn.Module):
         with torch.autocast(images.device.type, enabled=False):
             pooled = self.roi_pooler({k: v.float() for k, v in p_feats_roi.items()},
                                      sampled_props, image_shapes)
-        # both heads read the SAME pooled features independently (diagram: two
-        # parallel boxes off RoI Align), not one head feeding the other
+        # Detection uses sampled RPN regions; ReID pools GT regions below.
         cls_logits, det_bbox_deltas = self.det_head(pooled)
         flat_cls_labels = torch.cat(cls_labels)
         flat_matched_boxes = torch.cat(matched_gt_boxes)
@@ -168,11 +142,27 @@ class PersonSearchModel(nn.Module):
             flat_sampled_props, self.box_coder
         )
 
-        # --- metric loss ---
+        # GT-only scene supervision and original-resolution standalone crops.
         reid_keep = (flat_cls_labels == 1) & (flat_matched_ids >= 0)
-        filt_emb = self.reid_head(pooled[reid_keep])
-        filt_ids = flat_matched_ids[reid_keep]
-        metric_loss, metric_stats = self.metric_loss_fn(filt_emb, filt_ids)
+        scene_boxes = [t["boxes"][t["ids"] >= 0] for t in targets]
+        filt_ids = torch.cat([t["ids"][t["ids"] >= 0] for t in targets])
+        if any("query_crops" not in t or "image_id" not in t for t in targets):
+            raise ValueError("ReID training requires query_crops and image_id from the dataset")
+        source_ids = torch.cat([t["image_id"].reshape(1).expand(len(boxes))
+                                for t, boxes in zip(targets, scene_boxes)])
+        for target, boxes in zip(targets, scene_boxes):
+            if len(target["query_crops"]) != len(boxes):
+                raise ValueError("query_crops must align with labeled GT boxes")
+        with torch.autocast(images.device.type, enabled=False):
+            scene_pooled = self.roi_pooler({k: v.float() for k, v in p_feats_roi.items()},
+                                          scene_boxes, image_shapes)
+        scene_embeddings = self.reid_head(scene_pooled)
+        if len(filt_ids):
+            crop_embeddings = self.embed_crop(torch.cat([t["query_crops"] for t in targets]))
+        else:
+            crop_embeddings = scene_embeddings
+        metric_loss, metric_stats = cross_image_reid_loss(
+            scene_embeddings, crop_embeddings, filt_ids, source_ids, self.metric_loss_fn)
         with torch.no_grad():
             gt_count = sum(len(b) for b in gt_boxes_per_image)
             recalled = sum(
@@ -195,6 +185,11 @@ class PersonSearchModel(nn.Module):
             "_proposals": images.new_tensor(sum(len(p) for p in proposals)),
             "_positive_rois": (flat_cls_labels == 1).sum().detach(),
             "_labeled_rois": reid_keep.sum().detach(),
+            "_scene_reid_rois": images.new_tensor(len(filt_ids)),
+            "_query_reid_crops": images.new_tensor(len(crop_embeddings)),
+            "_metric_positive_pairs": images.new_tensor(metric_stats["num_pos_pairs"]),
+            "_metric_negative_pairs": images.new_tensor(metric_stats["num_neg_pairs"]),
+            "_cross_image_identities": images.new_tensor(metric_stats["cross_image_identities"]),
             "_reid_identities": images.new_tensor(filt_ids.unique().numel()),
             "_proposal_recall_iou50": images.new_tensor(recalled / max(gt_count, 1)),
             "_gt_persons": images.new_tensor(gt_count),
@@ -221,17 +216,22 @@ class PersonSearchModel(nn.Module):
 
         pooled = self.roi_pooler(p_feats_roi, proposals, image_shapes)
         cls_logits, det_bbox_deltas = self.det_head(pooled)
-        embeddings = self.reid_head(pooled)
-
-        return postprocess_detections(
+        # NMS selects boxes first; embeddings are computed at refined locations.
+        embeddings = pooled.new_empty((len(pooled), 0))
+        results = postprocess_detections(
             cls_logits, det_bbox_deltas, embeddings, proposals, image_shapes, self.box_coder,
             score_thresh=self.det_score_thresh, nms_thresh=self.det_nms_thresh,
             max_detections_per_image=self.det_max_detections
         )
+        boxes = [result["boxes"] for result in results]
+        refined_pooled = self.roi_pooler(p_feats_roi, boxes, image_shapes)
+        refined_embeddings = self.reid_head(refined_pooled)
+        for result, embedding in zip(results, refined_embeddings.split([len(b) for b in boxes])):
+            result["embeddings"] = embedding
+        return results
 
     # ------------------------------------------------------------------ #
 
-    @torch.no_grad()
     def embed_crop(self, crop: torch.Tensor) -> torch.Tensor:
         """
         Query-side path for inference.py: the query is normally given as a
@@ -239,7 +239,8 @@ class PersonSearchModel(nn.Module):
         running the whole RPN/proposal machinery on it would be wrong --
         there's no "which box is the person" ambiguity to resolve, the
         crop IS the box. Instead: backbone -> FPN -> pool the crop's own
-        full extent as a single "proposal" -> detection head -> embedding.
+        full extent as a single "proposal" -> ReID head -> embedding.
+        This path is differentiable for crop training; use inference_mode at inference.
 
         crop: (B, 3, H, W), a batch of person crops (can be B=1 for one query)
         returns: (B, embedding_dim) L2-normalized embeddings
@@ -253,7 +254,9 @@ class PersonSearchModel(nn.Module):
 
         # query side only ever needs the embedding, not class/bbox -- so
         # this path calls ReIDHead alone, skipping DetectionHead entirely
-        pooled = self.roi_pooler(p_feats_roi, boxes, image_shapes)
+        with torch.autocast(crop.device.type, enabled=False):
+            pooled = self.roi_pooler({k: v.float() for k, v in p_feats_roi.items()},
+                                     boxes, image_shapes)
         return self.reid_head(pooled)
 
 
@@ -271,6 +274,9 @@ if __name__ == "__main__":
         {"boxes": torch.tensor([[50., 50., 120., 300.]]), "ids": torch.tensor([3])},
     ]
 
+    for i, target in enumerate(targets):
+        target["query_crops"] = torch.randn(int((target["ids"] >= 0).sum()), 3, 128, 64)
+        target["image_id"] = torch.tensor(i)
     losses = model(images, targets)
     print("[Train] loss dict:")
     for k, v in losses.items():

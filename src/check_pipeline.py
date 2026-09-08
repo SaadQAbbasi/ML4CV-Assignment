@@ -59,21 +59,29 @@ def check_model(device):
         props = decode_proposals(obj, delta, anchors, [(128,96)]*2, model.box_coder,
                                  pre_nms_top_n=500, post_nms_top_n=128)
     targets = [{'boxes': p[:8].clone(), 'ids': torch.arange(8, device=device) % 2} for p in props]
+    for i, target in enumerate(targets):
+        target['query_crops'] = torch.randn(8, 3, 128, 64, device=device, requires_grad=True)
+        target['image_id'] = torch.tensor(i, device=device)
     received = []
     hook = model.reid_head.register_forward_pre_hook(lambda module, inputs: received.append(len(inputs[0])))
     losses = model(x, targets)
     hook.remove()
-    assert received == [int(losses['_labeled_rois'])]
+    assert received == [16, 16]
+    assert losses['_metric_positive_pairs'] == 64
     assert losses['_metric_valid_anchors'] > 0
     sum(v for k,v in losses.items() if not k.startswith('_')).backward()
     for name in ('backbone', 'fpn', 'rpn_head', 'det_head', 'reid_head'):
         grads = [p.grad for p in getattr(model, name).parameters() if p.grad is not None]
         assert grads and all(torch.isfinite(g).all() for g in grads)
         assert any(g.abs().sum() > 0 for g in grads), name
+    assert all(t['query_crops'].grad.abs().sum() > 0 for t in targets)
     model.zero_grad(set_to_none=True)
     # Empty GT and completely unlabeled persons should still train detection.
     for targets in ([{'boxes': x.new_empty(0,4), 'ids': torch.empty(0,dtype=torch.long,device=device)}]*2,
                     [{'boxes': p[:1], 'ids': torch.tensor([-1],device=device)} for p in props]):
+        for i, target in enumerate(targets):
+            target['query_crops'] = x.new_empty((0, 3, 128, 64))
+            target['image_id'] = torch.tensor(i, device=device)
         losses = model(x, targets)
         assert all(torch.isfinite(v) for v in losses.values())
         assert losses['metric_loss'] == 0
@@ -84,7 +92,13 @@ def check_model(device):
         # Check both populated detections and a threshold that yields no detections.
         for threshold in (0., 1.1):
             model.det_score_thresh = threshold
+            pooled_boxes = []
+            hook = model.roi_pooler.register_forward_pre_hook(
+                lambda module, inputs: pooled_boxes.append([b.clone() for b in inputs[1]]))
             results = model(x)
+            hook.remove()
+            assert len(pooled_boxes) == 2
+            assert all(torch.equal(b, r['boxes']) for b, r in zip(pooled_boxes[-1], results))
             for result in results:
                 assert all(torch.isfinite(v).all() for v in result.values())
                 if threshold == 0:

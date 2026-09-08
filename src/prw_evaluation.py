@@ -11,7 +11,7 @@ from PIL import Image
 from torchvision.ops import box_iou
 from torchvision.transforms.functional import normalize, pil_to_tensor, resize
 
-from prw_dataset import _load_mat_table, _mat_strings
+from prw_dataset import _load_mat_table, _mat_strings, preprocess_query_crop
 
 
 def _load_query_info(path: Path):
@@ -29,9 +29,9 @@ def _load_query_info(path: Path):
     return queries
 
 
-def _load_query_crop(path: Path, size=(128, 64), mean=(.485, .456, .406), std=(.229, .224, .225)):
-    image = pil_to_tensor(Image.open(path).convert("RGB")).float() / 255.0
-    return normalize(resize(image, list(size)), mean, std)
+def _load_query_crop(path: Path):
+    with Image.open(path) as image:
+        return preprocess_query_crop(image)
 
 
 def _load_gallery_target(root: Path, name: str):
