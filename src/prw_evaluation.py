@@ -1,6 +1,8 @@
 """PRW gallery/query retrieval evaluation for the person-search model."""
 
+from collections import Counter
 from pathlib import Path
+from time import perf_counter
 
 import numpy as np
 import torch
@@ -54,7 +56,8 @@ def _image_tensor(root: Path, name: str, size=(256, 384), mean=(.485, .456, .406
 @torch.inference_mode()
 def evaluate_prw(model, root, device, batch_size=2, max_queries=None, max_gallery=None,
                  score_threshold=None, iou_threshold=.5, return_records=False,
-                 table_queries=100, table_top_k=5):
+                 table_queries=100, table_top_k=5, query_batch_size=64,
+                 ranking_batch_size=8):
     """Evaluate cosine retrieval over PRW test frames.
 
     A gallery detection is relevant when it overlaps a same-ID annotation by
@@ -76,6 +79,7 @@ def evaluate_prw(model, root, device, batch_size=2, max_queries=None, max_galler
     if score_threshold is not None:
         model.det_score_thresh = score_threshold
     try:
+        gallery_started = perf_counter()
         for start in range(0, len(names), batch_size):
             batch_names = names[start:start + batch_size]
             tensors = []
@@ -97,74 +101,144 @@ def evaluate_prw(model, root, device, batch_size=2, max_queries=None, max_galler
                 print(f"PRW evaluation: embedded {len(gallery)}/{len(names)} gallery frames", flush=True)
     finally:
         model.det_score_thresh = threshold
+    print(f"PRW evaluation: gallery embedding finished in "
+          f"{perf_counter() - gallery_started:.1f}s", flush=True)
+
+    # Match each detection to GT once. The previous implementation repeated
+    # this IoU work for every query, resulting in millions of tiny CPU calls.
+    print("PRW evaluation: matching detections to gallery ground truth", flush=True)
+    frame_to_index = {entry["frame"]: index for index, entry in enumerate(gallery)}
+    gt_counts = Counter()
+    frame_gt_boxes = {}
+    detection_embeddings = []
+    detection_ids = []
+    detection_frames = []
+    detection_boxes = []
+    detection_gt_keys = []
+    gt_offset = 0
+    for frame_index, entry in enumerate(gallery):
+        gt_boxes, gt_ids = entry["target"]
+        for identity in gt_ids[gt_ids >= 0].tolist():
+            gt_counts[int(identity)] += 1
+        for identity in gt_ids[gt_ids >= 0].unique().tolist():
+            boxes = gt_boxes[gt_ids == identity] / entry["scale"]
+            frame_gt_boxes[(entry["frame"], int(identity))] = boxes
+
+        result = entry["result"]
+        if len(result["boxes"]) == 0:
+            gt_offset += len(gt_boxes)
+            continue
+        matched_ids = torch.full((len(result["boxes"]),), -1, dtype=torch.long)
+        matched_gt_keys = torch.full((len(result["boxes"]),), -1, dtype=torch.long)
+        if len(gt_boxes):
+            overlaps = box_iou(result["boxes"], gt_boxes)
+            best_iou, best_gt = overlaps.max(dim=1)
+            matched_ids = gt_ids[best_gt].clone()
+            valid_match = (best_iou >= iou_threshold) & (matched_ids >= 0)
+            matched_gt_keys[valid_match] = best_gt[valid_match] + gt_offset
+            matched_ids[~valid_match] = -1
+        detection_embeddings.append(result["embeddings"])
+        detection_ids.append(matched_ids)
+        detection_frames.append(torch.full((len(result["boxes"]),), frame_index, dtype=torch.long))
+        detection_boxes.append(result["boxes"] / entry["scale"])
+        detection_gt_keys.append(matched_gt_keys)
+        gt_offset += len(gt_boxes)
+
+    if detection_embeddings:
+        detection_embeddings = torch.cat(detection_embeddings)
+        detection_ids = torch.cat(detection_ids)
+        detection_frames = torch.cat(detection_frames)
+        detection_boxes = torch.cat(detection_boxes)
+        detection_gt_keys = torch.cat(detection_gt_keys)
+    else:
+        embedding_dim = model.reid_head.embedding_proj.out_features
+        detection_embeddings = torch.empty((0, embedding_dim))
+        detection_ids = torch.empty(0, dtype=torch.long)
+        detection_frames = torch.empty(0, dtype=torch.long)
+        detection_boxes = torch.empty((0, 4))
+        detection_gt_keys = torch.empty(0, dtype=torch.long)
 
     queries = _load_query_info(root / "query_info.txt")
     if max_queries is not None:
         queries = queries[:max_queries]
-    embeddings = []
+    query_items = []
     for query in queries:
         crop_path = root / "query_box" / f"{query['identity']}_{query['frame']}.jpg"
-        if not crop_path.exists():
-            continue
-        crop = _load_query_crop(crop_path).unsqueeze(0).to(device)
-        embeddings.append((query, model.embed_crop(crop)[0].cpu()))
-        if len(embeddings) % 250 == 0:
-            print(f"PRW evaluation: embedded {len(embeddings)}/{len(queries)} queries", flush=True)
+        if crop_path.exists():
+            query_items.append((query, crop_path, _load_query_crop(crop_path)))
+
+    query_embeddings = []
+    query_started = perf_counter()
+    for start in range(0, len(query_items), query_batch_size):
+        batch_items = query_items[start:start + query_batch_size]
+        crops = torch.stack([item[2] for item in batch_items]).to(device)
+        embeddings = model.embed_crop(crops).cpu()
+        query_embeddings.extend(embeddings.unbind())
+        print(f"PRW evaluation: embedded {len(query_embeddings)}/{len(query_items)} queries", flush=True)
+    print(f"PRW evaluation: query embedding finished in "
+          f"{perf_counter() - query_started:.1f}s", flush=True)
 
     average_precisions = []
     top1_hits = []
     records = []
-    for query, query_embedding in embeddings:
-        candidates = []
-        total_gt_relevant = 0
-        for entry in gallery:
-            if entry["frame"] == query["frame"]:
-                continue
-            result = entry["result"]
-            gallery_boxes, gallery_ids = entry["target"]
-            same_id_boxes = gallery_boxes[gallery_ids == query["identity"]]
-            gt_relevant = len(same_id_boxes)
-            total_gt_relevant += gt_relevant
-            if len(result["boxes"]) == 0:
-                continue
-            similarities = result["embeddings"] @ query_embedding
-            overlaps = box_iou(gallery_boxes, result["boxes"])
-            relevant = torch.zeros(len(result["boxes"]), dtype=torch.bool)
-            if gt_relevant:
-                relevant = ((gallery_ids == query["identity"]).float()[:, None] *
-                            (overlaps >= iou_threshold)).any(dim=0)
-            for score, is_relevant, box in zip(similarities.cpu().tolist(), relevant.tolist(), result["boxes"]):
-                candidates.append((score, bool(is_relevant), box / entry["scale"], entry["frame"],
-                                   gt_relevant, same_id_boxes / entry["scale"]))
-        candidates.sort(key=lambda item: item[0], reverse=True)
-        positives = [int(item[1]) for item in candidates]
-        # Normalize AP by relevant ground-truth instances, so missed people
-        # reduce AP instead of disappearing from the denominator.
-        num_positive = total_gt_relevant
-        if return_records and len(records) < table_queries:
-            records.append({
-                "identity": query["identity"],
-                "frame": query["frame"],
-                "query_path": str(root / "query_box" / f"{query['identity']}_{query['frame']}.jpg"),
-                "ground_truth_count": total_gt_relevant,
-                "ranked": [
-                    {"rank": rank, "score": score, "correct": is_relevant,
-                     "frame": frame, "box": box.tolist(), "gt_count": gt_count,
-                     "gt_boxes": gt_boxes.tolist()}
-                    for rank, (score, is_relevant, box, frame, gt_count, gt_boxes)
-                    in enumerate(candidates[:table_top_k], start=1)
-                ],
-            })
-        if num_positive == 0:
-            continue
-        hits = 0
-        precision_sum = 0.0
-        for rank, is_positive in enumerate(positives, start=1):
-            if is_positive:
-                hits += 1
-                precision_sum += hits / rank
-        average_precisions.append(precision_sum / num_positive)
-        top1_hits.append(positives[0] if positives else 0)
+    if len(detection_embeddings):
+        gallery_embeddings_device = detection_embeddings.to(device)
+        detection_ids_device = detection_ids.to(device)
+        detection_frames_device = detection_frames.to(device)
+        detection_gt_keys_device = detection_gt_keys.to(device)
+        ranking_started = perf_counter()
+        print(f"PRW evaluation: ranking {len(query_items)} queries against "
+              f"{len(detection_embeddings)} detections", flush=True)
+        for start in range(0, len(query_items), ranking_batch_size):
+            end = min(start + ranking_batch_size, len(query_items))
+            query_batch = torch.stack(query_embeddings[start:end]).to(device)
+            score_batch = query_batch @ gallery_embeddings_device.T
+            for offset, (query, crop_path, _) in enumerate(query_items[start:end]):
+                identity = query["identity"]
+                source_frame_index = frame_to_index.get(query["frame"], -1)
+                valid = detection_frames_device != source_frame_index
+                scores = score_batch[offset].masked_fill(~valid, float("-inf"))
+                order = torch.argsort(scores, descending=True)
+                relevant_candidates = (detection_ids_device[order] == identity) & valid[order]
+                total_gt_relevant = gt_counts[identity] - len(
+                    frame_gt_boxes.get((query["frame"], identity), ()))
+                candidate_ranks = relevant_candidates.nonzero(as_tuple=True)[0]
+                candidate_gt_keys = detection_gt_keys_device[order[candidate_ranks]].cpu().tolist()
+                # Multiple proposals may overlap one person. Only the highest-ranked
+                # proposal is a true positive; the rest remain false positives.
+                seen_gt = set()
+                positive_rank_indices = []
+                for candidate_rank, gt_key in zip(candidate_ranks.cpu().tolist(), candidate_gt_keys):
+                    if gt_key >= 0 and gt_key not in seen_gt:
+                        seen_gt.add(gt_key)
+                        positive_rank_indices.append(candidate_rank)
+                positive_ranks = torch.as_tensor(
+                    positive_rank_indices, device=device, dtype=torch.long) + 1
+                if total_gt_relevant > 0:
+                    hit_numbers = torch.arange(1, len(positive_ranks) + 1, device=device)
+                    average_precisions.append(float((hit_numbers / positive_ranks).sum() / total_gt_relevant))
+                    top1_hits.append(int(bool(len(positive_ranks) and positive_ranks[0] == 1)))
+
+                if return_records and len(records) < table_queries:
+                    positive_rank_set = set(positive_rank_indices)
+                    ranked = []
+                    for rank, detection_index in enumerate(order[:table_top_k].cpu().tolist(), start=1):
+                        frame = gallery[detection_frames[detection_index].item()]["frame"]
+                        gt_boxes = frame_gt_boxes.get((frame, identity), torch.empty((0, 4)))
+                        ranked.append({
+                            "rank": rank, "score": float(scores[detection_index]),
+                            "correct": rank - 1 in positive_rank_set,
+                            "frame": frame, "box": detection_boxes[detection_index].tolist(),
+                            "gt_count": len(gt_boxes), "gt_boxes": gt_boxes.tolist(),
+                        })
+                    records.append({
+                        "identity": identity, "frame": query["frame"],
+                        "query_path": str(crop_path),
+                        "ground_truth_count": total_gt_relevant, "ranked": ranked,
+                    })
+            print(f"PRW evaluation: ranked {end}/{len(query_items)} queries", flush=True)
+        print(f"PRW evaluation: ranking finished in "
+              f"{perf_counter() - ranking_started:.1f}s", flush=True)
 
     metrics = {
         "retrieval_mAP": float(np.mean(average_precisions)) if average_precisions else 0.0,
@@ -186,6 +260,9 @@ def make_wandb_retrieval_table(records, root):
         "gallery_frame", "gallery", "predicted_box", "same_id_gt_in_frame",
         "same_id_gt_total", "correct",
     ])
+    rows_added = 0
+    total_rows = sum(len(record["ranked"]) for record in records)
+    print(f"W&B retrieval table: preparing {total_rows} rows", flush=True)
     for record in records:
         query_image = wandb.Image(record["query_path"])
         for item in record["ranked"]:
@@ -214,4 +291,7 @@ def make_wandb_retrieval_table(records, root):
             table.add_data(record["identity"], record["frame"], query_image,
                            item["rank"], item["score"], item["frame"], gallery_image,
                            box, item["gt_count"], record["ground_truth_count"], item["correct"])
+            rows_added += 1
+            if rows_added % 50 == 0 or rows_added == total_rows:
+                print(f"W&B retrieval table: prepared {rows_added}/{total_rows} rows", flush=True)
     return table
