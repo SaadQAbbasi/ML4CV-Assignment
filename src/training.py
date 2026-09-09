@@ -28,8 +28,9 @@ def start_run(config, name='person-search', mode=None):
                      dir=str(Path(__file__).resolve().parents[1]),
                      settings=wandb.Settings(init_timeout=60))
     run.define_metric('train/step')
-    run.define_metric('train/*', step_metric='train/step')
-    run.define_metric('val/*', step_metric='train/step')
+    run.define_metric('epoch')
+    run.define_metric('train/*', step_metric='epoch')
+    run.define_metric('val/*', step_metric='epoch')
     return run
 
 
@@ -38,11 +39,12 @@ def move_batch(images, targets, device):
 
 
 def train_one_epoch(model, loader, optimizer, device, max_steps=None, log_every=1,
-                    run=None, scaler=None, start_step=0):
+                    run=None, scaler=None, start_step=0, epoch=0):
     model.train()
     amp = device.type == 'cuda'
     scaler = scaler or make_grad_scaler(device)
     history = {}
+    epoch_steps = len(loader) if max_steps is None else min(len(loader), max_steps)
     for step, (images, targets) in enumerate(loader):
         if max_steps is not None and step >= max_steps:
             break
@@ -76,7 +78,8 @@ def train_one_epoch(model, loader, optimizer, device, max_steps=None, log_every=
         for k, v in values.items():
             history.setdefault(k, []).append(v)
         if run:
-            run.log({'train/step': start_step + step,
+            run.log({'epoch': epoch + (step + 1) / max(epoch_steps, 1),
+                     'train/step': start_step + step,
                      **{f'train/{k.lstrip("_")}': v for k, v in values.items()}})
         if step % log_every == 0:
             print(f'step {start_step + step}: ' + ' | '.join(f'{k}={values[k]:.4f}' for k in LOSS_KEYS)
@@ -86,7 +89,7 @@ def train_one_epoch(model, loader, optimizer, device, max_steps=None, log_every=
 
 
 @torch.no_grad()
-def validate(model, loader, device, run=None, step=0, max_batches=2):
+def validate(model, loader, device, run=None, step=0, max_batches=2, epoch=None):
     """Held-out losses and detection diagnostics, not benchmark mAP/CMC."""
     was_training = model.training
     totals, batches = {}, 0
@@ -130,7 +133,11 @@ def validate(model, loader, device, run=None, step=0, max_batches=2):
                        detection_recall_iou50=recalled / max(gt_total, 1), detections=detection_count,
                        inference_seconds_per_image=sum(latencies) / max(len(latencies), 1),
                        embedding_norm=sum(norms) / max(len(norms), 1))
-        if run: run.log({'train/step': step, **{f'val/{k}': v for k, v in metrics.items()}})
+        if run:
+            payload = {'train/step': step, **{f'val/{k}': v for k, v in metrics.items()}}
+            if epoch is not None:
+                payload['epoch'] = epoch
+            run.log(payload)
         return metrics
     finally:
         model.train(was_training)
