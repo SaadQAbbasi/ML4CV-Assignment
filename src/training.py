@@ -92,7 +92,8 @@ def train_one_epoch(model, loader, optimizer, device, max_steps=None, log_every=
 def validate(model, loader, device, run=None, step=0, max_batches=2, epoch=None):
     """Held-out losses and detection diagnostics, not benchmark mAP/CMC."""
     was_training = model.training
-    totals, batches = {}, 0
+    totals, counts, batches = {}, {}, 0
+    positive_batches = 0
     gt_total = recalled = detection_count = 0
     latencies, norms = [], []
     try:
@@ -104,12 +105,22 @@ def validate(model, loader, device, run=None, step=0, max_batches=2, epoch=None)
             # so random target sampling does not alter subsequent training batches.
             devices = [device.index or 0] if device.type == 'cuda' else []
             with torch.random.fork_rng(devices=devices):
+                torch.manual_seed(0)  # repeat proposal sampling for comparable validation
                 model.train()
                 losses = model(images, targets)
+            has_positive = float(losses.get('_metric_positive_pairs', 0)) > 0
+            has_negative = float(losses.get('_metric_negative_pairs', 0)) > 0
+            positive_batches += int(has_positive)
             for k, value in losses.items():
                 if not torch.isfinite(value):
                     raise RuntimeError(f'Non-finite validation {k}')
-                totals[k.lstrip('_')] = totals.get(k.lstrip('_'), 0.0) + float(value)
+                if k == '_hardest_positive_distance' and not has_positive:
+                    continue
+                if k in ('_hardest_negative_distance', '_metric_active_fraction') and not has_negative:
+                    continue
+                key = k.lstrip('_')
+                totals[key] = totals.get(key, 0.0) + float(value)
+                counts[key] = counts.get(key, 0) + 1
             model.eval()
             if device.type == 'cuda': torch.cuda.synchronize(device)
             started = time.perf_counter()
@@ -128,7 +139,9 @@ def validate(model, loader, device, run=None, step=0, max_batches=2, epoch=None)
                     if len(target['boxes']):
                         recalled += int((box_iou(target['boxes'], boxes).max(1).values >= .5).sum())
             batches += 1
-        metrics = {k: v / max(batches, 1) for k, v in totals.items()}
+        metrics = {k: v / counts[k] for k, v in totals.items()}
+        metrics["positive_batch_fraction"] = positive_batches / max(batches, 1)
+        metrics["evaluated_batches"] = batches
         metrics.update(total=sum(metrics.get(k, 0) for k in LOSS_KEYS),
                        detection_recall_iou50=recalled / max(gt_total, 1), detections=detection_count,
                        inference_seconds_per_image=sum(latencies) / max(len(latencies), 1),

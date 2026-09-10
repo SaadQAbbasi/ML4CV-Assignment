@@ -9,10 +9,57 @@ import torch
 from PIL import Image
 
 from metric_loss import ContrastiveLoss, BatchHardTripletLoss, cross_image_reid_loss
-from prw_dataset import PRWPersonSearchDataset, preprocess_query_crop
+from prw_dataset import PRWPersonSearchDataset, preprocess_query_crop, PKIdentityBatchSampler
 
 
 class ReIDPathsTest(unittest.TestCase):
+    def test_fixed_pk_validation_preserves_rng_and_identity_coverage(self):
+        import random
+        class Dataset:
+            def identity_to_indices(self):
+                return {i: [i, i + 1, i + 2] for i in range(8)}
+        dataset = Dataset()
+        sampler = PKIdentityBatchSampler(dataset, p=4, k=2, seed=17)
+        state = random.getstate()
+        batches = list(sampler)
+        self.assertEqual(batches, list(sampler))
+        self.assertEqual(state, random.getstate())
+        self.assertEqual(len(batches), len(sampler))
+        for batch in batches:
+            self.assertEqual(len(batch), len(set(batch)))
+            covered = sum(len(set(frames) & set(batch)) >= 2
+                          for frames in dataset.identity_to_indices().values())
+            self.assertGreaterEqual(covered, 4)
+
+
+    def test_validation_distances_exclude_batches_without_pairs(self):
+        from training import validate, LOSS_KEYS
+        class Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.calls = 0
+            def forward(self, images, targets=None):
+                if not self.training:
+                    return [dict(boxes=torch.empty(0, 4), embeddings=torch.empty(0, 8),
+                                 scores=torch.empty(0))]
+                self.calls += 1
+                result = {key: torch.tensor(0.) for key in LOSS_KEYS}
+                positive = self.calls == 2
+                result.update(_metric_positive_pairs=torch.tensor(int(positive)),
+                              _metric_negative_pairs=torch.tensor(1),
+                              _hardest_positive_distance=torch.tensor(.8 if positive else 0.),
+                              _hardest_negative_distance=torch.tensor(.5),
+                              _metric_active_fraction=torch.tensor(.5))
+                return result
+        loader = [(torch.zeros(1, 3, 32, 32), [dict(boxes=torch.empty(0, 4))])] * 2
+        model = Model()
+        state = torch.random.get_rng_state()
+        metrics = validate(model, loader, torch.device('cpu'))
+        self.assertAlmostEqual(metrics['hardest_positive_distance'], .8)
+        self.assertEqual(metrics['positive_batch_fraction'], .5)
+        self.assertTrue(torch.equal(state, torch.random.get_rng_state()))
+        self.assertTrue(model.training)
+
     def test_cross_image_pairs_and_gradients(self):
         scene = torch.randn(4, 8, requires_grad=True)
         crops = torch.randn(4, 8, requires_grad=True)

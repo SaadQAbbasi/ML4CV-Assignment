@@ -180,7 +180,10 @@ class PRWSubset(Dataset):
 class PKIdentityBatchSampler(Sampler):
     """Yield batches covering P identities with K distinct frames per identity."""
 
-    def __init__(self, dataset, p: int = 4, k: int = 2):
+    def __init__(self, dataset, p: int = 4, k: int = 2, seed=None):
+        if p < 2 or k < 2:
+            raise ValueError("P and K must both be at least 2 for cross-image identity learning")
+        self.seed = seed  # fixed seed repeats validation batches without changing training RNG
         self.p = p
         self.k = k
         self.identity_to_indices = dataset.identity_to_indices()
@@ -191,11 +194,12 @@ class PKIdentityBatchSampler(Sampler):
 
     def __iter__(self):
         identities = self.eligible_identities.copy()
-        random.shuffle(identities)
+        rng = random if self.seed is None else random.Random(self.seed)
+        rng.shuffle(identities)
         for start in range(0, len(identities) - self.p + 1, self.p):
             batch = []
             for identity in identities[start:start + self.p]:
-                batch.extend(random.sample(list(set(self.identity_to_indices[identity])), self.k))
+                batch.extend(rng.sample(sorted(set(self.identity_to_indices[identity])), self.k))
             yield list(dict.fromkeys(batch))
 
     def __len__(self):
