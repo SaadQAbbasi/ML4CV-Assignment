@@ -110,6 +110,7 @@ def evaluate_prw(model, root, device, batch_size=2, max_queries=None, max_galler
     frame_to_index = {entry["frame"]: index for index, entry in enumerate(gallery)}
     gt_counts = Counter()
     frame_gt_boxes = {}
+    detection_scores = []
     detection_embeddings = []
     detection_ids = []
     detection_frames = []
@@ -137,6 +138,7 @@ def evaluate_prw(model, root, device, batch_size=2, max_queries=None, max_galler
             valid_match = (best_iou >= iou_threshold) & (matched_ids >= 0)
             matched_gt_keys[valid_match] = best_gt[valid_match] + gt_offset
             matched_ids[~valid_match] = -1
+        detection_scores.append(result["scores"])
         detection_embeddings.append(result["embeddings"])
         detection_ids.append(matched_ids)
         detection_frames.append(torch.full((len(result["boxes"]),), frame_index, dtype=torch.long))
@@ -145,6 +147,7 @@ def evaluate_prw(model, root, device, batch_size=2, max_queries=None, max_galler
         gt_offset += len(gt_boxes)
 
     if detection_embeddings:
+        detection_scores = torch.cat(detection_scores)
         detection_embeddings = torch.cat(detection_embeddings)
         detection_ids = torch.cat(detection_ids)
         detection_frames = torch.cat(detection_frames)
@@ -228,6 +231,7 @@ def evaluate_prw(model, root, device, batch_size=2, max_queries=None, max_galler
                         gt_boxes = frame_gt_boxes.get((frame, identity), torch.empty((0, 4)))
                         ranked.append({
                             "rank": rank, "score": float(scores[detection_index]),
+                            "person_confidence": float(detection_scores[detection_index]),
                             "correct": rank - 1 in positive_rank_set,
                             "frame": frame, "box": detection_boxes[detection_index].tolist(),
                             "gt_count": len(gt_boxes), "gt_boxes": gt_boxes.tolist(),
@@ -301,7 +305,7 @@ def make_wandb_retrieval_table(records, root):
     root = Path(root)
     max_predictions = max((len(record["ranked"]) for record in records), default=0)
     columns = ["query_id", "query_frame", "query", "same_id_gt_total"]
-    prediction_fields = ["predicted_box", "similarity", "correct", "gallery_frame",
+    prediction_fields = ["predicted_box", "similarity", "person_confidence", "correct", "gallery_frame",
                          "gallery", "box_xyxy", "same_id_gt_in_frame"]
     for rank in range(1, max_predictions + 1):
         columns.extend(f"top_{rank}_{field}" for field in prediction_fields)
@@ -339,7 +343,7 @@ def make_wandb_retrieval_table(records, root):
             with Image.open(root / "frames" / f"{item['frame']}.jpg") as source:
                 predicted_crop = wandb.Image(source.convert("RGB").crop(tuple(box)),
                                             caption=f"Rank {item['rank']} | similarity {item['score']:.3f}")
-            row.extend([predicted_crop, item["score"], item["correct"], item["frame"],
+            row.extend([predicted_crop, item["score"], item.get("person_confidence"), item["correct"], item["frame"],
                         gallery_image, str(box), item["gt_count"]])
         row.extend([None] * (len(columns) - len(row)))
         table.add_data(*row)
