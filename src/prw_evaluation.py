@@ -54,11 +54,37 @@ def _image_tensor(root: Path, name: str, size=(256, 384), mean=(.485, .456, .406
 
 
 @torch.inference_mode()
+def embed_detected_crops(model, image_path, boxes, device, batch_size=32):
+    """Embed retained boxes in original-image xyxy coordinates, preserving order.
+
+    Uses the exact same original-pixel preprocessing as standalone queries.
+    Empty detections do not run the crop backbone.
+    """
+    if batch_size < 1:
+        raise ValueError("crop batch_size must be positive")
+    if not len(boxes):
+        return torch.empty((0, model.reid_head.embedding_proj.out_features))
+    embeddings = []
+    with Image.open(image_path) as source:
+        image = source.convert("RGB")
+        for start in range(0, len(boxes), batch_size):
+            crops = torch.stack([
+                preprocess_query_crop(image.crop(tuple(box.tolist())))
+                for box in boxes[start:start + batch_size].cpu()
+            ])
+            embeddings.append(model.embed_crop(crops.to(device)).cpu())
+    return torch.cat(embeddings)
+
+
+@torch.inference_mode()
 def evaluate_prw(model, root, device, batch_size=2, max_queries=None, max_gallery=None,
-                 score_threshold=None, iou_threshold=.5, return_records=False,
+                 score_threshold=.5, iou_threshold=.5, return_records=False,
                  table_queries=100, table_top_k=5, query_batch_size=64,
-                 ranking_batch_size=8):
+                 ranking_batch_size=8, gallery_crop_batch_size=32):
     """Evaluate cosine retrieval over PRW test frames.
+
+    Gallery embeddings use original-resolution detected crops after filtering/NMS.
+    Query and gallery crops share preprocessing and the same embedding path.
 
     A gallery detection is relevant when it overlaps a same-ID annotation by
     at least ``iou_threshold``. The query's source frame is excluded.
@@ -96,6 +122,9 @@ def evaluate_prw(model, root, device, batch_size=2, max_queries=None, max_galler
             results = model(torch.stack(tensors).to(device))
             for name, result, target, scale in zip(batch_names, results, targets, scales):
                 result = {key: value.cpu() for key, value in result.items()}
+                result["embeddings"] = embed_detected_crops(
+                    model, root / "frames" / f"{name}.jpg",
+                    result["boxes"] / scale, device, gallery_crop_batch_size)
                 gallery.append({"frame": name, "result": result, "target": target, "scale": scale})
             if len(gallery) % 500 < batch_size:
                 print(f"PRW evaluation: embedded {len(gallery)}/{len(names)} gallery frames", flush=True)
