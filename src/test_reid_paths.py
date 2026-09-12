@@ -13,6 +13,23 @@ from prw_dataset import PRWPersonSearchDataset, preprocess_query_crop, PKIdentit
 
 
 class ReIDPathsTest(unittest.TestCase):
+    def test_crop_to_crop_balancing_and_exclusion(self):
+        from metric_loss import crop_to_crop_reid_loss
+        emb = torch.tensor([[0., 0.], [.2, 0.], [.4, 0.], [.5, 0.]], requires_grad=True)
+        ids = torch.tensor([1, 1, 1, 2])
+        frames = torch.tensor([0, 0, 1, 1])
+        loss, stats = crop_to_crop_reid_loss(emb, ids, frames, ContrastiveLoss())
+        # Same-image pair (0,1) and all self-pairs are absent.
+        expected_positive = (.4**2 + .2**2) / 2
+        expected_negative = (.5**2 + .7**2 + .9**2) / 3
+        self.assertAlmostEqual(loss.item(), (expected_positive + expected_negative) / 2, places=6)
+        self.assertEqual(stats['num_pos_pairs'], 4)
+        self.assertEqual(stats['num_neg_pairs'], 6)
+        loss.backward()
+        self.assertTrue(torch.isfinite(emb.grad).all())
+        self.assertGreater(emb.grad.abs().sum().item(), 0)
+
+
     def test_fixed_pk_validation_preserves_rng_and_identity_coverage(self):
         import random
         class Dataset:

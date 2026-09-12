@@ -81,6 +81,9 @@ def evaluate_prw(model, root, device, batch_size=2, max_queries=None, max_galler
                  score_threshold=.5, iou_threshold=.5, return_records=False,
                  table_queries=100, table_top_k=5, query_batch_size=64,
                  ranking_batch_size=8, gallery_crop_batch_size=32):
+
+
+    
     """Evaluate cosine retrieval over PRW test frames.
 
     Gallery embeddings use original-resolution detected crops after filtering/NMS.
@@ -88,6 +91,30 @@ def evaluate_prw(model, root, device, batch_size=2, max_queries=None, max_galler
 
     A gallery detection is relevant when it overlaps a same-ID annotation by
     at least ``iou_threshold``. The query's source frame is excluded.
+
+    batch_size : int
+        Number of gallery frames to process at once. Each frame may contain multiple detections.
+    max_queries : int or None
+        Limit the number of queries to evaluate. None means all queries.
+    max_gallery : int or None
+        Limit the number of gallery frames to evaluate. None means all frames.
+    score_threshold : float or None
+        Minimum detection confidence to retain a gallery box. None means use the model's default.
+    iou_threshold : float
+        Minimum IoU between a gallery detection and a same-ID annotation to count as relevant.
+    return_records : bool
+        If True, return a list of query records with ranked retrieval results.
+    table_queries : int
+        Maximum number of query records to save for W&B table and plotting.
+    table_top_k : int
+        Maximum number of ranked retrievals to save for W&B table and plotting.
+    query_batch_size : int
+        Number of query crops to embed at once. Each crop is a single person.
+    ranking_batch_size : int
+        Number of queries to rank against the gallery at once. Each query is a single person.
+    gallery_crop_batch_size : int
+        Number of detected gallery crops to embed at once. Each crop is a single person.    
+
     """
     root = Path(root)
     split = _load_mat_table(root / "frame_test.mat")

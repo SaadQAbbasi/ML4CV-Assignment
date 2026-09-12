@@ -1,7 +1,7 @@
-"""Person search with shared scene/crop identity learning.
+"""Person search with joint detection and GT crop-to-crop identity learning.
 
 Training returns five losses: RPN objectness/regression, detection
-classification/regression, and cross-image crop-to-GT-scene metric loss.
+classification/regression, and cross-image GT crop-to-crop metric loss.
 Targets contain boxes, ids (-1 for unlabeled), image_id, and query_crops
 (one preprocessed original-resolution crop per labeled GT box, in order).
 
@@ -21,7 +21,7 @@ from rpn import (build_anchor_generator, RPNHead, RPNTargetAssigner, compute_rpn
                   RPN_BATCH_SIZE_PER_IMAGE, RPN_POSITIVE_FRACTION)
 from roi_heads import (build_roi_pooler, DetectionHead, ReIDHead, ROITargetAssigner,
                         compute_detection_loss, postprocess_detections, ROI_ALIGN_OUTPUT_SIZE)
-from metric_loss import BatchHardTripletLoss, ContrastiveLoss, cross_image_reid_loss
+from metric_loss import BatchHardTripletLoss, ContrastiveLoss, crop_to_crop_reid_loss
 from torchvision.ops import box_iou
 
 
@@ -129,7 +129,7 @@ class PersonSearchModel(nn.Module):
         with torch.autocast(images.device.type, enabled=False):
             pooled = self.roi_pooler({k: v.float() for k, v in p_feats_roi.items()},
                                      sampled_props, image_shapes)
-        # Detection uses sampled RPN regions; ReID pools GT regions below.
+        # Detection uses sampled RPN regions; ReID processes standalone GT crops below.
         cls_logits, det_bbox_deltas = self.det_head(pooled)
         flat_cls_labels = torch.cat(cls_labels)
         flat_matched_boxes = torch.cat(matched_gt_boxes)
@@ -142,7 +142,7 @@ class PersonSearchModel(nn.Module):
             flat_sampled_props, self.box_coder
         )
 
-        # GT-only scene supervision and original-resolution standalone crops.
+        # Experiment 04: identity supervision uses original-resolution GT crops only.
         reid_keep = (flat_cls_labels == 1) & (flat_matched_ids >= 0)
         scene_boxes = [t["boxes"][t["ids"] >= 0] for t in targets]
         filt_ids = torch.cat([t["ids"][t["ids"] >= 0] for t in targets])
@@ -153,16 +153,13 @@ class PersonSearchModel(nn.Module):
         for target, boxes in zip(targets, scene_boxes):
             if len(target["query_crops"]) != len(boxes):
                 raise ValueError("query_crops must align with labeled GT boxes")
-        with torch.autocast(images.device.type, enabled=False):
-            scene_pooled = self.roi_pooler({k: v.float() for k, v in p_feats_roi.items()},
-                                          scene_boxes, image_shapes)
-        scene_embeddings = self.reid_head(scene_pooled)
         if len(filt_ids):
             crop_embeddings = self.embed_crop(torch.cat([t["query_crops"] for t in targets]))
         else:
-            crop_embeddings = scene_embeddings
-        metric_loss, metric_stats = cross_image_reid_loss(
-            scene_embeddings, crop_embeddings, filt_ids, source_ids, self.metric_loss_fn)
+            # Differentiable zero without running a backbone on an empty batch.
+            crop_embeddings = self.reid_head.embedding_proj.weight[:, :0].T
+        metric_loss, metric_stats = crop_to_crop_reid_loss(
+            crop_embeddings, filt_ids, source_ids, self.metric_loss_fn)
         with torch.no_grad():
             gt_count = sum(len(b) for b in gt_boxes_per_image)
             recalled = sum(
@@ -185,7 +182,7 @@ class PersonSearchModel(nn.Module):
             "_proposals": images.new_tensor(sum(len(p) for p in proposals)),
             "_positive_rois": (flat_cls_labels == 1).sum().detach(),
             "_labeled_rois": reid_keep.sum().detach(),
-            "_scene_reid_rois": images.new_tensor(len(filt_ids)),
+            "_scene_reid_rois": images.new_tensor(0),  # no scene-region metric branch
             "_query_reid_crops": images.new_tensor(len(crop_embeddings)),
             "_metric_positive_pairs": images.new_tensor(metric_stats["num_pos_pairs"]),
             "_metric_negative_pairs": images.new_tensor(metric_stats["num_neg_pairs"]),

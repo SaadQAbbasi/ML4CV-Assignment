@@ -1,7 +1,6 @@
 """Identity losses and cross-image crop-to-scene supervision.
 
-PersonSearchModel uses cross_image_reid_loss on labeled GT scene regions
-and standalone crops. Same-source positives are excluded. The standalone
+PersonSearchModel uses crop_to_crop_reid_loss on standalone labeled GT crops. Same-source positives are excluded. The standalone
 triplet/contrastive modules remain available for embedding-only checks.
 """
 
@@ -224,3 +223,14 @@ def cross_image_reid_loss(scene, crops, ids, image_ids, loss_fn):
         groups.append(negative_losses.mean())
         stats["active_fraction"] = float((negative_losses > 0).float().mean().detach())
     return (torch.stack(groups).mean() if groups else zero), stats
+
+
+def crop_to_crop_reid_loss(embeddings, ids, image_ids, loss_fn):
+    """Experiment 04: same-ID positives must originate from different images.
+
+    Reuse the cross-image masks with a single embedding bank. Diagonal and
+    same-image same-ID entries are excluded from both terms. Different-ID
+    negatives may share a source image. Counts are directed pairs (A,B and
+    B,A); their symmetric means preserve the existing balanced loss scale.
+    """
+    return cross_image_reid_loss(embeddings, embeddings, ids, image_ids, loss_fn)

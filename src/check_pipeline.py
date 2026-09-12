@@ -66,7 +66,7 @@ def check_model(device):
     hook = model.reid_head.register_forward_pre_hook(lambda module, inputs: received.append(len(inputs[0])))
     losses = model(x, targets)
     hook.remove()
-    assert received == [16, 16]
+    assert received == [16], "ReID must run only once, on standalone crops"
     assert losses['_metric_positive_pairs'] == 64
     assert losses['_metric_valid_anchors'] > 0
     sum(v for k,v in losses.items() if not k.startswith('_')).backward()
