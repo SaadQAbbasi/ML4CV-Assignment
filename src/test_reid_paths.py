@@ -13,6 +13,40 @@ from prw_dataset import PRWPersonSearchDataset, preprocess_query_crop, PKIdentit
 
 
 class ReIDPathsTest(unittest.TestCase):
+    def test_crop_triplet_hard_mining(self):
+        from metric_loss import crop_to_crop_reid_loss
+        # Anchor 0 must ignore farther same-ID index 1 (same image),
+        # and use index 2 from another image as its positive.
+        emb = torch.tensor([[0., 0.], [2., 0.], [.2, 0.], [.3, 0.]], requires_grad=True)
+        ids = torch.tensor([1, 1, 1, 2])
+        frames = torch.tensor([0, 0, 1, 1])
+        loss, stats = crop_to_crop_reid_loss(emb, ids, frames, BatchHardTripletLoss(.3))
+        # Valid anchors 0,1,2: hinge losses .2, .4, 2.0; singleton ID2 excluded.
+        self.assertAlmostEqual(loss.item(), (.2 + .4 + 2.) / 3, places=6)
+        self.assertEqual(stats['valid_anchors'], 3)
+        self.assertEqual(stats['active_fraction'], 1.)
+        loss.backward()
+        self.assertTrue(torch.isfinite(emb.grad).all())
+        self.assertGreater(emb.grad.abs().sum().item(), 0)
+
+    def test_crop_triplet_missing_pairs_and_satisfied_margin(self):
+        from metric_loss import crop_to_crop_reid_loss
+        for positions, ids, frames in [
+            ([], [], []),
+            ([0., .1], [1, 1], [0, 1]),  # no negative
+            ([0., .1], [1, 2], [0, 1]),  # no positive
+            ([0., .1], [1, 1], [0, 0]),  # same-source only
+            ([0., .1, 1., 1.1], [1, 1, 2, 2], [0, 1, 0, 1]),
+        ]:
+            emb = torch.tensor(positions).reshape(-1, 1).requires_grad_()
+            loss, stats = crop_to_crop_reid_loss(
+                emb, torch.tensor(ids), torch.tensor(frames), BatchHardTripletLoss(.3))
+            self.assertEqual(loss.item(), 0.)
+            self.assertEqual(stats['active_fraction'], 0.)
+            loss.backward()
+            self.assertTrue(torch.isfinite(emb.grad).all())
+
+
     def test_crop_to_crop_balancing_and_exclusion(self):
         from metric_loss import crop_to_crop_reid_loss
         emb = torch.tensor([[0., 0.], [.2, 0.], [.4, 0.], [.5, 0.]], requires_grad=True)
