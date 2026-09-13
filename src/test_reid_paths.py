@@ -13,6 +13,38 @@ from prw_dataset import PRWPersonSearchDataset, preprocess_query_crop, PKIdentit
 
 
 class ReIDPathsTest(unittest.TestCase):
+    def test_supcon_reference_and_gradients(self):
+        from metric_loss import SupervisedNTXentLoss, crop_to_crop_reid_loss
+        import torch.nn.functional as F
+        emb = torch.randn(5, 8, requires_grad=True)
+        ids = torch.tensor([1, 1, 1, 2, 2])
+        frames = torch.tensor([0, 0, 1, 0, 1])
+        normalized = F.normalize(emb.float(), dim=1)
+        values = []
+        for i in range(5):
+            pos = [j for j in range(5) if ids[i] == ids[j] and frames[i] != frames[j]]
+            neg = [j for j in range(5) if ids[i] != ids[j]]
+            logits = (normalized[i] @ normalized.T) / .1
+            values.append(torch.logsumexp(logits[pos + neg], 0) - logits[pos].mean())
+        with torch.autocast('cpu', dtype=torch.bfloat16):
+            loss, stats = crop_to_crop_reid_loss(emb, ids, frames, SupervisedNTXentLoss(.1))
+        self.assertTrue(torch.allclose(loss, torch.stack(values).mean(), atol=1e-5))
+        self.assertNotIn('active_fraction', stats)
+        loss.backward()
+        self.assertTrue(torch.isfinite(emb.grad).all())
+        self.assertGreater(emb.grad.abs().sum().item(), 0)
+
+    def test_supcon_degenerate(self):
+        from metric_loss import SupervisedNTXentLoss, crop_to_crop_reid_loss
+        for labels in ([], [1], [1, 1], [1, 2]):
+            emb = torch.randn(len(labels), 4, requires_grad=True)
+            loss, _ = crop_to_crop_reid_loss(emb, torch.tensor(labels),
+                torch.arange(len(labels)), SupervisedNTXentLoss())
+            self.assertEqual(loss.item(), 0.)
+            loss.backward()
+        for temperature in (0, -1, float('nan')):
+            with self.assertRaises(ValueError): SupervisedNTXentLoss(temperature)
+
     def test_crop_triplet_hard_mining(self):
         from metric_loss import crop_to_crop_reid_loss
         # Anchor 0 must ignore farther same-ID index 1 (same image),

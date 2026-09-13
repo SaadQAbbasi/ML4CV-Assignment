@@ -180,6 +180,33 @@ if __name__ == "__main__":
           f"stats={e_stats} (must not crash)")
 
 
+class SupervisedNTXentLoss(nn.Module):
+    """Mean positive log-probability (SupCon), with cross-image identity masks.
+
+    See https://arxiv.org/abs/2004.11362. No extra temperature/base-temperature
+    multiplier. Anchors need a positive and a negative, as in our triplet path.
+    """
+    def __init__(self, temperature=0.1):
+        super().__init__()
+        import math
+        if not math.isfinite(temperature) or temperature <= 0:
+            raise ValueError("temperature must be finite and positive")
+        self.temperature = temperature
+
+    def forward(self, crops, scene, positive, negative, valid):
+        if not valid.any():
+            return (crops.sum() + scene.sum()) * 0.0
+        # Disable autocast for stable cosine/logsumexp even under FP16/BF16 training.
+        with torch.autocast(crops.device.type, enabled=False):
+            logits = F.normalize(crops.float(), dim=1) @ F.normalize(scene.float(), dim=1).T
+            logits = logits[valid] / self.temperature
+            positives = positive[valid]
+            allowed = (positive | negative)[valid]
+            log_denom = torch.logsumexp(logits.masked_fill(~allowed, -float("inf")), dim=1)
+            mean_positive = logits.masked_fill(~positives, 0.).sum(1) / positives.sum(1)
+            return (log_denom - mean_positive).mean()
+
+
 def cross_image_reid_loss(scene, crops, ids, image_ids, loss_fn):
     """Cross-path pairs: positives must share identity but not source image.
 
@@ -207,6 +234,10 @@ def cross_image_reid_loss(scene, crops, ids, image_ids, loss_fn):
     if negative.any():
         stats["hardest_negative_distance"] = float(
             distances.masked_fill(~negative, float("inf")).min(1).values[negative.any(1)].mean().detach())
+    if isinstance(loss_fn, SupervisedNTXentLoss):
+        # Softmax loss has no hinge-based active/inactive distinction.
+        stats.pop("active_fraction", None)
+        return loss_fn(crops, scene, positive, negative, valid), stats
     if isinstance(loss_fn, BatchHardTripletLoss):
         if not valid.any():
             return zero, stats

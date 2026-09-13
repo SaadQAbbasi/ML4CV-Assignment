@@ -21,7 +21,7 @@ from rpn import (build_anchor_generator, RPNHead, RPNTargetAssigner, compute_rpn
                   RPN_BATCH_SIZE_PER_IMAGE, RPN_POSITIVE_FRACTION)
 from roi_heads import (build_roi_pooler, DetectionHead, ReIDHead, ROITargetAssigner,
                         compute_detection_loss, postprocess_detections, ROI_ALIGN_OUTPUT_SIZE)
-from metric_loss import BatchHardTripletLoss, ContrastiveLoss, crop_to_crop_reid_loss
+from metric_loss import BatchHardTripletLoss, ContrastiveLoss, SupervisedNTXentLoss, crop_to_crop_reid_loss
 from torchvision.ops import box_iou
 
 
@@ -39,7 +39,8 @@ class PersonSearchModel(nn.Module):
                  anchor_sizes=((16,), (32,), (64,), (128,)),
                  anchor_ratios=((2.0, 3.0, 4.0),) * 4,
                  rpn_fg_iou_thresh: float = 0.7, rpn_bg_iou_thresh: float = 0.3,
-                 roi_fg_iou_thresh: float = 0.7, roi_bg_iou_thresh: float = 0.3):
+                 roi_fg_iou_thresh: float = 0.7, roi_bg_iou_thresh: float = 0.3,
+                 reid_temperature: float = 0.1):
         super().__init__()
 
         self.backbone, self.fpn = build_backbone_with_fpn(
@@ -64,8 +65,10 @@ class PersonSearchModel(nn.Module):
             self.metric_loss_fn = BatchHardTripletLoss(margin=triplet_margin)
         elif metric_loss == "contrastive":
             self.metric_loss_fn = ContrastiveLoss(margin=1.0)
+        elif metric_loss == "supcon":
+            self.metric_loss_fn = SupervisedNTXentLoss(reid_temperature)
         else:
-            raise ValueError("metric_loss must be 'triplet' or 'contrastive'")
+            raise ValueError("metric_loss must be 'triplet', 'contrastive', or 'supcon'")
 
         self.box_coder = BoxCoder(weights=BOX_CODER_WEIGHTS)
 
@@ -175,7 +178,8 @@ class PersonSearchModel(nn.Module):
             "metric_loss": metric_loss,
             # not a loss, but useful to log alongside the losses so a
             # collapsing metric_loss can be diagnosed (see module docstring)
-            "_metric_active_fraction": images.new_tensor(metric_stats.get("active_fraction", 0.0)),
+            **({"_metric_active_fraction": images.new_tensor(metric_stats["active_fraction"])}
+               if "active_fraction" in metric_stats else {}),
             "_hardest_positive_distance": images.new_tensor(metric_stats.get("hardest_positive_distance", 0.0)),
             "_hardest_negative_distance": images.new_tensor(metric_stats.get("hardest_negative_distance", 0.0)),
             "_rpn_positive_anchors": sum((labels == 1).sum() for labels in rpn_labels).detach(),
