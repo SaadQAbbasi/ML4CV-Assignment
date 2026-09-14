@@ -107,6 +107,8 @@ def validate(model, loader, device, run=None, step=0, max_batches=2, epoch=None)
             with torch.random.fork_rng(devices=devices):
                 torch.manual_seed(0)  # repeat proposal sampling for comparable validation
                 model.train()
+                # Keep loss dispatch active, but disable Swin stochastic depth/dropout.
+                model.backbone.eval()
                 losses = model(images, targets)
             has_positive = float(losses.get('_metric_positive_pairs', 0)) > 0
             has_negative = float(losses.get('_metric_negative_pairs', 0)) > 0

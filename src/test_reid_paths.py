@@ -121,6 +121,7 @@ class ReIDPathsTest(unittest.TestCase):
             def __init__(self):
                 super().__init__()
                 self.calls = 0
+                self.backbone = torch.nn.Identity()
             def forward(self, images, targets=None):
                 if not self.training:
                     return [dict(boxes=torch.empty(0, 4), embeddings=torch.empty(0, 8),
