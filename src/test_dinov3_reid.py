@@ -16,6 +16,26 @@ class TinyBackbone(nn.Module):
         return {'x_norm_clstoken': self.dropout(self.conv(x).mean((2,3)))}
 
 class FrozenV3Tests(unittest.TestCase):
+    def test_raw_cls_bypasses_projection(self):
+        from dinov3_reid import FrozenDinoV3CLS
+        from dino_reid import DinoPersonSearch
+        from test_dino_reid import FakeDetector
+        from prw_evaluation import embed_detected_crops
+        projected=DinoV3CropReID(backbone=TinyBackbone(),embedding_dim=4)
+        raw=FrozenDinoV3CLS(projected.backbone).train()
+        x=torch.randn(3,3,128,64)
+        with torch.no_grad():
+            expected=torch.nn.functional.normalize(projected.backbone.forward_features(x)['x_norm_clstoken'],dim=1)
+        with patch.object(projected.embedding_proj,'forward',side_effect=AssertionError('Projection called')):
+            actual=raw(x)
+        self.assertEqual(actual.shape,(3,8))
+        self.assertTrue(torch.allclose(actual,expected))
+        self.assertFalse(actual.requires_grad)
+        self.assertTrue(torch.allclose(actual.norm(dim=1),torch.ones(3)))
+        model=DinoPersonSearch(FakeDetector(),raw)
+        empty=embed_detected_crops(model,'unused',torch.empty(0,4),'cpu')
+        self.assertEqual(empty.shape,(0,8))
+
     def test_only_head_updates(self):
         torch.manual_seed(1)
         model=DinoV3CropReID(backbone=TinyBackbone(),embedding_dim=4).train()

@@ -31,3 +31,29 @@ class DinoV3CropReID(nn.Module):
         with torch.no_grad():
             features = self.backbone.forward_features(crops)['x_norm_clstoken']
         return F.normalize(self.embedding_proj(features), dim=1)
+
+
+class FrozenDinoV3CLS(nn.Module):
+    """Evaluation-only raw CLS embedding, with no learned projection.
+
+    Shares a restored DINO backbone; does not change the source projection.
+    embedding_proj is an identity adapter exposing the dimension expected by
+    evaluate_prw when a gallery frame has no detections.
+    """
+    def __init__(self, backbone):
+        super().__init__()
+        self.backbone = backbone.requires_grad_(False).eval()
+        self.embedding_proj = nn.Identity()
+        self.embedding_proj.out_features = backbone.embed_dim
+
+    def train(self, mode=True):
+        super().train(False)
+        return self
+
+    @torch.inference_mode()
+    def forward(self, crops):
+        self.backbone.eval()
+        h, w = crops.shape[-2:]
+        crops = F.pad(crops, (0, (-w) % 16, 0, (-h) % 16))
+        features = self.backbone.forward_features(crops)['x_norm_clstoken']
+        return F.normalize(features.float(), dim=1)
