@@ -2,7 +2,7 @@
 import torch
 from torch import nn
 from torch.nn import functional as F
-from metric_loss import BatchHardTripletLoss, crop_to_crop_reid_loss
+from metric_loss import BatchHardTripletLoss, SupervisedNTXentLoss, crop_to_crop_reid_loss
 
 
 class DinoCropReID(nn.Module):
@@ -69,12 +69,17 @@ class DinoPersonSearch(nn.Module):
 
 
 def crop_epoch(reid, loader, device, optimizer=None, scaler=None, margin=.3,
-               run=None, epoch=0, max_batches=None):
+               run=None, epoch=0, max_batches=None, metric_loss="triplet", temperature=.1):
     """Train/validate only DINO crop embeddings; no full images sent to GPU."""
     from training import amp_dtype
     training = optimizer is not None
     reid.train(training)
-    criterion = BatchHardTripletLoss(margin)
+    if metric_loss == "triplet":
+        criterion = BatchHardTripletLoss(margin)
+    elif metric_loss == "supcon":
+        criterion = SupervisedNTXentLoss(temperature)
+    else:
+        raise ValueError("metric_loss must be 'triplet' or 'supcon'")
     totals, count, positive_batches = {}, 0, 0
     for step, (_, targets) in enumerate(loader):
         if max_batches is not None and step >= max_batches:

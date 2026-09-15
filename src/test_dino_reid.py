@@ -45,6 +45,29 @@ class DinoTest(unittest.TestCase):
         model.det_score_thresh=.8
         self.assertEqual(detector.det_score_thresh,.8)
         self.assertEqual(len(model(torch.randn(2,3,64,64))),2)
+    def test_supcon_epoch_uses_selected_loss_and_updates_head(self):
+        from metric_loss import SupervisedNTXentLoss, crop_to_crop_reid_loss
+        torch.manual_seed(17)
+        reid = DinoCropReID(FakeDino(), embedding_dim=4, train_last_blocks=1)
+        targets = [dict(ids=torch.tensor([1, 2]), image_id=torch.tensor(i),
+                        query_crops=torch.randn(2, 3, 28, 14)) for i in range(2)]
+        loader = [(torch.empty(0), targets)]
+        reid.eval()
+        with torch.no_grad():
+            emb = reid(torch.cat([t['query_crops'] for t in targets]))
+            expected, _ = crop_to_crop_reid_loss(emb, torch.tensor([1,2,1,2]),
+                torch.tensor([0,0,1,1]), SupervisedNTXentLoss(.2))
+        result = crop_epoch(reid, loader, torch.device('cpu'), metric_loss='supcon', temperature=.2)
+        self.assertAlmostEqual(result['metric_loss'], float(expected), places=6)
+        self.assertNotIn('active_fraction', result)
+        before = reid.embedding_proj.weight.detach().clone()
+        opt = torch.optim.AdamW([p for p in reid.parameters() if p.requires_grad], lr=.001)
+        crop_epoch(reid, loader, torch.device('cpu'), opt, make_grad_scaler(torch.device('cpu')),
+                   metric_loss='supcon', temperature=.2)
+        self.assertFalse(torch.equal(before, reid.embedding_proj.weight))
+        self.assertIsNone(reid.backbone.stem.weight.grad)
+        self.assertIsNotNone(reid.backbone.blocks[-1].weight.grad)
+
     def test_training_validation_checkpoint_roundtrip(self):
         reid = DinoCropReID(FakeDino(), embedding_dim=4, train_last_blocks=0)
         targets=[dict(ids=torch.tensor([1,2]), image_id=torch.tensor(i),query_crops=torch.randn(2,3,128,64)) for i in range(2)]
