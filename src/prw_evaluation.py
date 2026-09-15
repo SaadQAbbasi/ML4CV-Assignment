@@ -80,12 +80,16 @@ def embed_detected_crops(model, image_path, boxes, device, batch_size=32):
 def evaluate_prw(model, root, device, batch_size=2, max_queries=None, max_gallery=None,
                  score_threshold=.5, iou_threshold=.5, return_records=False,
                  table_queries=100, table_top_k=5, query_batch_size=64,
-                 ranking_batch_size=8, gallery_crop_batch_size=32):
+                 ranking_batch_size=8, gallery_crop_batch_size=32, gallery_mode="detected"):
 
 
     
     """Evaluate cosine retrieval over PRW test frames.
 
+    gallery_mode='gt' bypasses detection and embeds every annotated gallery
+    person crop, including unlabeled distractors. Queries, source-frame exclusion
+    and AP denominators are identical to detected mode. GT identities are used
+    only for scoring, never supplied to the embedding model.
     Gallery embeddings use original-resolution detected crops after filtering/NMS.
     Query and gallery crops share preprocessing and the same embedding path.
 
@@ -116,6 +120,8 @@ def evaluate_prw(model, root, device, batch_size=2, max_queries=None, max_galler
         Number of detected gallery crops to embed at once. Each crop is a single person.    
 
     """
+    if gallery_mode not in ("detected", "gt"):
+        raise ValueError("gallery_mode must be 'detected' or 'gt'")
     root = Path(root)
     split = _load_mat_table(root / "frame_test.mat")
     # frame_test.mat contains a MATLAB string array under this key.
@@ -146,7 +152,11 @@ def evaluate_prw(model, root, device, batch_size=2, max_queries=None, max_galler
                 boxes[:, 0::2] *= scale
                 boxes[:, 1::2] *= scale
                 targets.append((boxes, ids))
-            results = model(torch.stack(tensors).to(device))
+            if gallery_mode == "gt":
+                results = [{"boxes": boxes.clone(), "scores": torch.ones(len(boxes))}
+                           for boxes, ids in targets]
+            else:
+                results = model(torch.stack(tensors).to(device))
             for name, result, target, scale in zip(batch_names, results, targets, scales):
                 result = {key: value.cpu() for key, value in result.items()}
                 result["embeddings"] = embed_detected_crops(
@@ -187,7 +197,12 @@ def evaluate_prw(model, root, device, batch_size=2, max_queries=None, max_galler
             continue
         matched_ids = torch.full((len(result["boxes"]),), -1, dtype=torch.long)
         matched_gt_keys = torch.full((len(result["boxes"]),), -1, dtype=torch.long)
-        if len(gt_boxes):
+        if gallery_mode == "gt":
+            # Direct annotation assignment avoids ambiguous overlapping GT boxes.
+            matched_ids = gt_ids.clone()
+            known = gt_ids >= 0
+            matched_gt_keys[known] = torch.arange(len(gt_ids))[known] + gt_offset
+        elif len(gt_boxes):
             overlaps = box_iou(result["boxes"], gt_boxes)
             best_iou, best_gt = overlaps.max(dim=1)
             matched_ids = gt_ids[best_gt].clone()
@@ -287,7 +302,7 @@ def evaluate_prw(model, root, device, batch_size=2, max_queries=None, max_galler
                         gt_boxes = frame_gt_boxes.get((frame, identity), torch.empty((0, 4)))
                         ranked.append({
                             "rank": rank, "score": float(scores[detection_index]),
-                            "person_confidence": float(detection_scores[detection_index]),
+                            "person_confidence": float(detection_scores[detection_index]) if gallery_mode == "detected" else None,
                             "correct": rank - 1 in positive_rank_set,
                             "frame": frame, "box": detection_boxes[detection_index].tolist(),
                             "gt_count": len(gt_boxes), "gt_boxes": gt_boxes.tolist(),
@@ -301,7 +316,34 @@ def evaluate_prw(model, root, device, batch_size=2, max_queries=None, max_galler
         print(f"PRW evaluation: ranking finished in "
               f"{perf_counter() - ranking_started:.1f}s", flush=True)
 
+    # Include queries with relevant GT even when the detector returns no boxes.
+    if not len(detection_embeddings):
+        for query, _, _ in query_items:
+            total = gt_counts[query["identity"]] - len(
+                frame_gt_boxes.get((query["frame"], query["identity"]), ()))
+            if total > 0:
+                average_precisions.append(0.)
+                top1_hits.append(0)
+
+    detector_metrics = {}
+    if gallery_mode == "detected":
+        from retrieval_diagnostics import detection_counts
+        for overlap_threshold in (.5, .75):
+            hits = predicted = annotated = 0
+            for entry in gallery:
+                h, n, g = detection_counts(entry["result"]["boxes"],
+                    entry["result"]["scores"], entry["target"][0],
+                    float("-inf"), overlap_threshold)
+                hits += h
+                predicted += n
+                annotated += g
+            suffix = int(overlap_threshold * 100)
+            detector_metrics[f"detection_precision_iou{suffix}"] = hits / max(predicted, 1)
+            detector_metrics[f"detection_recall_iou{suffix}"] = hits / max(annotated, 1)
+
     metrics = {
+        **detector_metrics,
+        "gallery_mode": gallery_mode,
         "retrieval_mAP": float(np.mean(average_precisions)) if average_precisions else 0.0,
         "retrieval_top1": float(np.mean(top1_hits)) if top1_hits else 0.0,
         "retrieval_queries": len(average_precisions),
