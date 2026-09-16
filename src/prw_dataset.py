@@ -18,10 +18,10 @@ from torchvision.transforms.functional import normalize, pil_to_tensor, resize
 QUERY_CROP_SIZE = (128, 64)
 
 
-def preprocess_query_crop(image):
+def preprocess_query_crop(image, size=QUERY_CROP_SIZE):
     """Shared training/query preprocessing for an arbitrary-size RGB PIL crop."""
     tensor = pil_to_tensor(image.convert("RGB")).float() / 255.0
-    return normalize(resize(tensor, list(QUERY_CROP_SIZE)),
+    return normalize(resize(tensor, list(size)),
                      (.485, .456, .406), (.229, .224, .225))
 
 
@@ -80,7 +80,9 @@ class PRWPersonSearchDataset(Dataset):
         image_size: tuple[int, int] = (256, 384),
         image_mean: tuple[float, float, float] = (.485, .456, .406),
         image_std: tuple[float, float, float] = (.229, .224, .225),
+        query_crop_size: tuple[int, int] = QUERY_CROP_SIZE,
     ):
+        self.query_crop_size = tuple(query_crop_size)
         self.root = Path(root)
         self.split = split
         self.image_h, self.image_w = image_size
@@ -135,10 +137,10 @@ class PRWPersonSearchDataset(Dataset):
         original_boxes = _annotation_boxes(annotation)
         valid = (original_boxes[:, 2:] > original_boxes[:, :2]).all(dim=1)
         original_boxes = original_boxes[valid]
-        crops = [preprocess_query_crop(raw.crop(tuple(box.tolist())))
+        crops = [preprocess_query_crop(raw.crop(tuple(box.tolist())), self.query_crop_size)
                  for box, identity in zip(original_boxes, target["ids"]) if identity >= 0]
         target["query_crops"] = (torch.stack(crops) if crops else
-                                 torch.empty((0, 3, *QUERY_CROP_SIZE)))
+                                 torch.empty((0, 3, *self.query_crop_size)))
         target["image_id"] = torch.tensor(idx, dtype=torch.long)
         return self._load_image(name), target
 

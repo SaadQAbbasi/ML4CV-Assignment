@@ -186,6 +186,7 @@ class ReIDPathsTest(unittest.TestCase):
             dataset.frames_dir = dataset.annotations_dir = root
             dataset.image_names = ['frame']
             dataset.image_h, dataset.image_w = 32, 48
+            dataset.query_crop_size = (128, 64)
             dataset.image_mean = (.485, .456, .406)
             dataset.image_std = (.229, .224, .225)
             annotation = np.array([[7, 10, 5, 20, 40], [-1, 40, 5, 20, 40],

@@ -29,9 +29,9 @@ def _load_query_info(path: Path):
     return queries
 
 
-def _load_query_crop(path: Path):
+def _load_query_crop(path: Path, size=(128, 64)):
     with Image.open(path) as image:
-        return preprocess_query_crop(image)
+        return preprocess_query_crop(image, size)
 
 
 def _load_gallery_target(root: Path, name: str):
@@ -69,7 +69,8 @@ def embed_detected_crops(model, image_path, boxes, device, batch_size=32):
         image = source.convert("RGB")
         for start in range(0, len(boxes), batch_size):
             crops = torch.stack([
-                preprocess_query_crop(image.crop(tuple(box.tolist())))
+                preprocess_query_crop(image.crop(tuple(box.tolist())),
+                                      getattr(getattr(model, "reid_head", None), "crop_size", (128, 64)))
                 for box in boxes[start:start + batch_size].cpu()
             ])
             embeddings.append(model.embed_crop(crops.to(device)).cpu())
@@ -239,7 +240,7 @@ def evaluate_prw(model, root, device, batch_size=2, max_queries=None, max_galler
     for query in queries:
         crop_path = root / "query_box" / f"{query['identity']}_{query['frame']}.jpg"
         if crop_path.exists():
-            query_items.append((query, crop_path, _load_query_crop(crop_path)))
+            query_items.append((query, crop_path, _load_query_crop(crop_path, getattr(getattr(model, "reid_head", None), "crop_size", (128, 64)))))
 
     query_embeddings = []
     query_started = perf_counter()

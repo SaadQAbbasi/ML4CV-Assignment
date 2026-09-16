@@ -34,7 +34,7 @@ class RetrievalEvaluationTests(unittest.TestCase):
                  patch.object(evaluation, '_image_tensor', return_value=(torch.zeros(3, 8, 8), 1.)), \
                  patch.object(evaluation, '_load_gallery_target', side_effect=lambda *a: (boxes.clone(), identities.clone())), \
                  patch.object(evaluation, '_load_query_info', return_value=queries), \
-                 patch.object(evaluation, '_load_query_crop', side_effect=lambda p: torch.eye(3)[int(p.name[0])-1]), \
+                 patch.object(evaluation, '_load_query_crop', side_effect=lambda p, size: torch.eye(3)[int(p.name[0])-1]), \
                  patch.object(evaluation, 'embed_detected_crops', side_effect=lambda m,p,b,d,bs: torch.eye(3)[:len(b)]):
                 model = FakeModel()
                 detected = evaluation.evaluate_prw(model, root, 'cpu')

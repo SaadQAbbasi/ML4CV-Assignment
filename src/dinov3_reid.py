@@ -7,8 +7,9 @@ from torch.nn import functional as F
 
 class DinoV3CropReID(nn.Module):
     def __init__(self, backbone=None, hub_repo='facebookresearch/dinov3:main',
-                 embedding_dim=256, weights_path=None, pretrained=True, train_last_blocks=0):
+                 embedding_dim=256, weights_path=None, pretrained=True, train_last_blocks=0, crop_size=(128, 64)):
         super().__init__()
+        self.crop_size = tuple(crop_size)
         if backbone is None:
             kwargs = dict(pretrained=pretrained, trust_repo=True)
             if pretrained:
