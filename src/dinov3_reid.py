@@ -7,7 +7,7 @@ from torch.nn import functional as F
 
 class DinoV3CropReID(nn.Module):
     def __init__(self, backbone=None, hub_repo='facebookresearch/dinov3:main',
-                 embedding_dim=256, weights_path=None, pretrained=True, train_last_blocks=0, crop_size=(128, 64)):
+                 embedding_dim=256, weights_path=None, pretrained=True, train_last_blocks=0, crop_size=(128, 64), classifier_ids=None):
         super().__init__()
         self.crop_size = tuple(crop_size)
         if backbone is None:
@@ -26,6 +26,13 @@ class DinoV3CropReID(nn.Module):
                 block.requires_grad_(True)
             self.backbone.norm.requires_grad_(True)
         self.embedding_proj = nn.Linear(backbone.embed_dim, embedding_dim)
+        self.identity_classifier = None
+        if classifier_ids is not None:
+            labels = sorted(set(int(i) for i in classifier_ids))
+            if not labels or labels[0] < 0:
+                raise ValueError('Classifier requires known training identities')
+            self.register_buffer('classifier_ids', torch.tensor(labels, dtype=torch.long))
+            self.identity_classifier = nn.Linear(embedding_dim, len(labels))
         self.train()
 
     def train(self, mode=True):
@@ -36,13 +43,19 @@ class DinoV3CropReID(nn.Module):
                 block.train()
         return self
 
-    def forward(self, crops):
+    def forward(self, crops, return_logits=False):
         h, w = crops.shape[-2:]
         crops = F.pad(crops, (0, (-w) % 16, 0, (-h) % 16))
         # Respect outer inference contexts; frozen mode retains the old behavior.
         with torch.set_grad_enabled(torch.is_grad_enabled() and self.train_last_blocks > 0):
             features = self.backbone.forward_features(crops)['x_norm_clstoken']
-        return F.normalize(self.embedding_proj(features), dim=1)
+        projected = self.embedding_proj(features)
+        embeddings = F.normalize(projected, dim=1)
+        if return_logits:
+            if self.identity_classifier is None:
+                raise ValueError('No identity classifier configured')
+            return embeddings, self.identity_classifier(projected)
+        return embeddings
 
 
 class FrozenDinoV3CLS(nn.Module):

@@ -69,9 +69,11 @@ class DinoPersonSearch(nn.Module):
 
 
 def crop_epoch(reid, loader, device, optimizer=None, scaler=None, margin=.3,
-               run=None, epoch=0, max_batches=None, metric_loss="triplet", temperature=.1):
+               run=None, epoch=0, max_batches=None, metric_loss="triplet", temperature=.1, classification_weight=0.):
     """Train/validate only DINO crop embeddings; no full images sent to GPU."""
     from training import amp_dtype
+    if classification_weight < 0:
+        raise ValueError('classification_weight must be nonnegative')
     training = optimizer is not None
     reid.train(training)
     if metric_loss == "triplet":
@@ -94,8 +96,24 @@ def crop_epoch(reid, loader, device, optimizer=None, scaler=None, margin=.3,
             optimizer.zero_grad(set_to_none=True)
         with torch.set_grad_enabled(training):
             with torch.autocast(device.type, enabled=device.type == 'cuda', dtype=amp_dtype(device)):
-                emb = reid(crops)
-                loss, stats = crop_to_crop_reid_loss(emb, ids, frames, criterion)
+                if classification_weight:
+                    emb, logits = reid(crops, return_logits=True)
+                else:
+                    emb = reid(crops)
+                metric_value, stats = crop_to_crop_reid_loss(emb, ids, frames, criterion)
+                loss = metric_value
+                if classification_weight:
+                    labels = reid.classifier_ids
+                    positions = torch.searchsorted(labels, ids)
+                    known = (positions < len(labels)) & (labels[positions.clamp(max=len(labels)-1)] == ids)
+                    if training and not known.all():
+                        raise ValueError('Training identity missing from saved classifier mapping')
+                    ce = (F.cross_entropy(logits[known].float(), positions[known])
+                          if known.any() else logits.sum()*0.)
+                    loss = loss + classification_weight*ce
+                    stats.update(classification_loss=float(ce.detach()),
+                                 classification_known_crops=int(known.sum()),
+                                 classification_total_crops=len(ids))
             if not torch.isfinite(loss):
                 raise RuntimeError('Nonfinite DINO metric loss')
             if training:
@@ -104,7 +122,7 @@ def crop_epoch(reid, loader, device, optimizer=None, scaler=None, margin=.3,
                 torch.nn.utils.clip_grad_norm_(reid.parameters(), 10., error_if_nonfinite=True)
                 scaler.step(optimizer)
                 scaler.update()
-        values = dict(metric_loss=float(loss.detach()), **stats)
+        values = dict(metric_loss=float(metric_value.detach()), total_loss=float(loss.detach()), **stats)
         positive_batches += int(stats['num_pos_pairs'] > 0)
         for key, value in values.items():
             totals[key] = totals.get(key, 0.) + value
