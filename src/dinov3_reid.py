@@ -7,8 +7,11 @@ from torch.nn import functional as F
 
 class DinoV3CropReID(nn.Module):
     def __init__(self, backbone=None, hub_repo='facebookresearch/dinov3:main',
-                 embedding_dim=256, weights_path=None, pretrained=True, train_last_blocks=0, crop_size=(128, 64), classifier_ids=None):
+                 embedding_dim=256, weights_path=None, pretrained=True, train_last_blocks=0, crop_size=(128, 64), classifier_ids=None, feature_pooling="cls"):
         super().__init__()
+        if feature_pooling not in ("cls", "cls_mean_patch"):
+            raise ValueError("feature_pooling must be 'cls' or 'cls_mean_patch'")
+        self.feature_pooling = feature_pooling
         self.crop_size = tuple(crop_size)
         if backbone is None:
             kwargs = dict(pretrained=pretrained, trust_repo=True)
@@ -25,7 +28,7 @@ class DinoV3CropReID(nn.Module):
             for block in self.backbone.blocks[-train_last_blocks:]:
                 block.requires_grad_(True)
             self.backbone.norm.requires_grad_(True)
-        self.embedding_proj = nn.Linear(backbone.embed_dim, embedding_dim)
+        self.embedding_proj = nn.Linear(backbone.embed_dim * (2 if feature_pooling == "cls_mean_patch" else 1), embedding_dim)
         self.identity_classifier = None
         if classifier_ids is not None:
             labels = sorted(set(int(i) for i in classifier_ids))
@@ -48,7 +51,12 @@ class DinoV3CropReID(nn.Module):
         crops = F.pad(crops, (0, (-w) % 16, 0, (-h) % 16))
         # Respect outer inference contexts; frozen mode retains the old behavior.
         with torch.set_grad_enabled(torch.is_grad_enabled() and self.train_last_blocks > 0):
-            features = self.backbone.forward_features(crops)['x_norm_clstoken']
+            outputs = self.backbone.forward_features(crops)
+            features = outputs['x_norm_clstoken']
+            if self.feature_pooling == "cls_mean_patch":
+                # Official patch output excludes CLS and register/storage tokens.
+                patches = outputs['x_norm_patchtokens']
+                features = torch.cat((features, patches.mean(dim=1)), dim=1)
         projected = self.embedding_proj(features)
         embeddings = F.normalize(projected, dim=1)
         if return_logits:
