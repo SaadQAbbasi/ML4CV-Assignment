@@ -9,8 +9,8 @@ class DinoV3CropReID(nn.Module):
     def __init__(self, backbone=None, hub_repo='facebookresearch/dinov3:main',
                  embedding_dim=256, weights_path=None, pretrained=True, train_last_blocks=0, crop_size=(128, 64), classifier_ids=None, feature_pooling="cls"):
         super().__init__()
-        if feature_pooling not in ("cls", "cls_mean_patch"):
-            raise ValueError("feature_pooling must be 'cls' or 'cls_mean_patch'")
+        if feature_pooling not in ("cls", "cls_mean_patch", "cls_upper_lower"):
+            raise ValueError("feature_pooling must be 'cls', 'cls_mean_patch' or 'cls_upper_lower'")
         self.feature_pooling = feature_pooling
         self.crop_size = tuple(crop_size)
         if backbone is None:
@@ -28,7 +28,7 @@ class DinoV3CropReID(nn.Module):
             for block in self.backbone.blocks[-train_last_blocks:]:
                 block.requires_grad_(True)
             self.backbone.norm.requires_grad_(True)
-        self.embedding_proj = nn.Linear(backbone.embed_dim * (2 if feature_pooling == "cls_mean_patch" else 1), embedding_dim)
+        self.embedding_proj = nn.Linear(backbone.embed_dim * {"cls": 1, "cls_mean_patch": 2, "cls_upper_lower": 3}[feature_pooling], embedding_dim)
         self.identity_classifier = None
         if classifier_ids is not None:
             labels = sorted(set(int(i) for i in classifier_ids))
@@ -57,6 +57,17 @@ class DinoV3CropReID(nn.Module):
                 # Official patch output excludes CLS and register/storage tokens.
                 patches = outputs['x_norm_patchtokens']
                 features = torch.cat((features, patches.mean(dim=1)), dim=1)
+            elif self.feature_pooling == "cls_upper_lower":
+                patches = outputs['x_norm_patchtokens']
+                rows, cols = crops.shape[-2] // 16, crops.shape[-1] // 16
+                if rows < 2 or patches.shape[1] != rows * cols:
+                    raise ValueError('Upper/lower pooling requires a matching ViT-S/16 grid with at least two rows')
+                # Patch tokens are row-major; split height, not alternating tokens.
+                grid = patches.reshape(patches.shape[0], rows, cols, patches.shape[-1])
+                split = rows // 2
+                upper = grid[:, :split].mean(dim=(1, 2))
+                lower = grid[:, split:].mean(dim=(1, 2))
+                features = torch.cat((features, upper, lower), dim=1)
         projected = self.embedding_proj(features)
         embeddings = F.normalize(projected, dim=1)
         if return_logits:
