@@ -78,3 +78,28 @@ class RegionPoolingTests(unittest.TestCase):
         with self.assertRaises(ValueError):model(torch.randn(1,3,16,32))
         bad=DinoV3CropReID(backbone=PatchBackbone(),feature_pooling='cls_upper_lower')
         with self.assertRaises(ValueError):bad(crops)
+
+class ThreeRegionTests(unittest.TestCase):
+    def test_three_bands_exact_coverage_and_restore(self):
+        model=DinoV3CropReID(backbone=SpatialBackbone(),embedding_dim=3,
+                            train_last_blocks=1,feature_pooling='cls_three_regions')
+        crops=torch.randn(2,3,256,128)
+        captured=[]
+        handle=model.embedding_proj.register_forward_pre_hook(lambda m,args:captured.append(args[0]))
+        emb=model(crops)
+        handle.remove()
+        cls=model.backbone.forward_features(crops)['x_norm_clstoken']
+        # Row-major indices 0:40, 40:80, 80:128: 5/5/6 rows.
+        expected=torch.cat([cls,cls+19.5,cls+59.5,cls+103.5],1)
+        self.assertTrue(torch.allclose(captured[0],expected))
+        self.assertEqual(model.embedding_proj.in_features,16)
+        self.assertTrue(torch.allclose(emb.norm(dim=1),torch.ones(2)))
+        emb[:,0].sum().backward()
+        self.assertIsNotNone(model.backbone.blocks[-1].weight.grad)
+        self.assertIsNone(model.backbone.blocks[0].weight.grad)
+        clone=DinoV3CropReID(backbone=SpatialBackbone(),embedding_dim=3,
+                            train_last_blocks=1,feature_pooling='cls_three_regions')
+        clone.load_state_dict(model.state_dict(),strict=True)
+        model.eval();clone.eval()
+        self.assertTrue(torch.equal(model(crops),clone(crops)))
+        with self.assertRaises(ValueError):model(torch.randn(1,3,32,16))
