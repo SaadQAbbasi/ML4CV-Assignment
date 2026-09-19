@@ -40,9 +40,10 @@ class PersonSearchModel(nn.Module):
                  anchor_ratios=((2.0, 3.0, 4.0),) * 4,
                  rpn_fg_iou_thresh: float = 0.7, rpn_bg_iou_thresh: float = 0.3,
                  roi_fg_iou_thresh: float = 0.7, roi_bg_iou_thresh: float = 0.3,
-                 reid_temperature: float = 0.1):
+                 reid_temperature: float = 0.1, detection_only: bool = False):
         super().__init__()
 
+        self.detection_only = detection_only
         self.backbone, self.fpn = build_backbone_with_fpn(
             backbone_name, fpn_out_channels=fpn_out_channels, pretrained=pretrained, add_p6=False
         )
@@ -60,6 +61,8 @@ class PersonSearchModel(nn.Module):
         # detected regions at gallery inference.
         self.det_head = DetectionHead(in_channels=fpn_out_channels)
         self.reid_head = ReIDHead(in_channels=fpn_out_channels, embedding_dim=embedding_dim)
+        if detection_only:
+            self.reid_head.requires_grad_(False)
         self.roi_assigner = ROITargetAssigner(roi_fg_iou_thresh, roi_bg_iou_thresh)
         if metric_loss == "triplet":
             self.metric_loss_fn = BatchHardTripletLoss(margin=triplet_margin)
@@ -145,6 +148,10 @@ class PersonSearchModel(nn.Module):
             flat_sampled_props, self.box_coder
         )
 
+        if self.detection_only:
+            return dict(rpn_objectness_loss=rpn_obj_loss, rpn_bbox_loss=rpn_box_loss,
+                        det_cls_loss=det_cls_loss, det_bbox_loss=det_box_loss)
+
         # Experiment 04: identity supervision uses original-resolution GT crops only.
         reid_keep = (flat_cls_labels == 1) & (flat_matched_ids >= 0)
         scene_boxes = [t["boxes"][t["ids"] >= 0] for t in targets]
@@ -224,6 +231,8 @@ class PersonSearchModel(nn.Module):
             score_thresh=self.det_score_thresh, nms_thresh=self.det_nms_thresh,
             max_detections_per_image=self.det_max_detections
         )
+        if self.detection_only:
+            return results
         boxes = [result["boxes"] for result in results]
         refined_pooled = self.roi_pooler(p_feats_roi, boxes, image_shapes)
         refined_embeddings = self.reid_head(refined_pooled)

@@ -81,7 +81,9 @@ class PRWPersonSearchDataset(Dataset):
         image_mean: tuple[float, float, float] = (.485, .456, .406),
         image_std: tuple[float, float, float] = (.229, .224, .225),
         query_crop_size: tuple[int, int] = QUERY_CROP_SIZE,
+        include_query_crops: bool = True,
     ):
+        self.include_query_crops = include_query_crops
         self.query_crop_size = tuple(query_crop_size)
         self.root = Path(root)
         self.split = split
@@ -132,6 +134,9 @@ class PRWPersonSearchDataset(Dataset):
         image = pil_to_tensor(raw).float() / 255.0
         _, h, w = image.shape
         target = self._load_target(name, (h, w))
+        if not getattr(self, "include_query_crops", True):
+            target["image_id"] = torch.tensor(idx, dtype=torch.long)
+            return self._load_image(name), target
         # Crop original-resolution pixels, before full-scene downsampling.
         annotation = _load_mat_table(self.annotations_dir / f"{name}.jpg.mat")
         original_boxes = _annotation_boxes(annotation)
