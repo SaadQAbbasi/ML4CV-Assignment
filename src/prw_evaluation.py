@@ -81,11 +81,15 @@ def embed_detected_crops(model, image_path, boxes, device, batch_size=32):
 def evaluate_prw(model, root, device, batch_size=2, max_queries=None, max_gallery=None,
                  score_threshold=.5, iou_threshold=.5, return_records=False,
                  table_queries=100, table_top_k=5, query_batch_size=64,
-                 ranking_batch_size=8, gallery_crop_batch_size=32, gallery_mode="detected"):
+                 ranking_batch_size=8, gallery_crop_batch_size=32, gallery_mode="detected", detector_image_size=(256, 384)):
 
 
     
     """Evaluate cosine retrieval over PRW test frames.
+
+    detector_image_size is the scene (height, width) resize/padding canvas;
+    pass the detector checkpoint's saved image_size. Person crop size is separate
+    and comes from the ReID model. The default preserves older evaluations.
 
     gallery_mode='gt' bypasses detection and embeds every annotated gallery
     person crop, including unlabeled distractors. Queries, source-frame exclusion
@@ -123,6 +127,9 @@ def evaluate_prw(model, root, device, batch_size=2, max_queries=None, max_galler
     """
     if gallery_mode not in ("detected", "gt"):
         raise ValueError("gallery_mode must be 'detected' or 'gt'")
+    if (len(detector_image_size) != 2 or
+        any(not isinstance(v, int) or isinstance(v, bool) or v <= 0 for v in detector_image_size)):
+        raise ValueError("detector_image_size must be two positive integers (height, width)")
     root = Path(root)
     split = _load_mat_table(root / "frame_test.mat")
     # frame_test.mat contains a MATLAB string array under this key.
@@ -146,7 +153,7 @@ def evaluate_prw(model, root, device, batch_size=2, max_queries=None, max_galler
             targets = []
             scales = []
             for name in batch_names:
-                tensor, scale = _image_tensor(root, name)
+                tensor, scale = _image_tensor(root, name, size=detector_image_size)
                 tensors.append(tensor)
                 scales.append(scale)
                 boxes, ids = _load_gallery_target(root, name)

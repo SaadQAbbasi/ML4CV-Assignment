@@ -31,13 +31,14 @@ class RetrievalEvaluationTests(unittest.TestCase):
                 (root / 'query_box' / f'{i}_a.jpg').touch()
             with patch.object(evaluation, '_load_mat_table', return_value=torch.zeros(1)), \
                  patch.object(evaluation, '_mat_strings', return_value=['a', 'b']), \
-                 patch.object(evaluation, '_image_tensor', return_value=(torch.zeros(3, 8, 8), 1.)), \
+                 patch.object(evaluation, '_image_tensor', return_value=(torch.zeros(3, 8, 8), 1.)) as image_loader, \
                  patch.object(evaluation, '_load_gallery_target', side_effect=lambda *a: (boxes.clone(), identities.clone())), \
                  patch.object(evaluation, '_load_query_info', return_value=queries), \
                  patch.object(evaluation, '_load_query_crop', side_effect=lambda p, size: torch.eye(3)[int(p.name[0])-1]), \
                  patch.object(evaluation, 'embed_detected_crops', side_effect=lambda m,p,b,d,bs: torch.eye(3)[:len(b)]):
                 model = FakeModel()
-                detected = evaluation.evaluate_prw(model, root, 'cpu')
+                detected = evaluation.evaluate_prw(model, root, 'cpu', detector_image_size=(512,768))
+                self.assertTrue(all(c.kwargs['size']==(512,768) for c in image_loader.call_args_list))
                 with patch.object(FakeModel, '__call__', side_effect=AssertionError('Detector invoked in GT mode')):
                     gt = evaluation.evaluate_prw(model, root, 'cpu', gallery_mode='gt', return_records=True)
         self.assertEqual(detected['retrieval_queries'], 2)
