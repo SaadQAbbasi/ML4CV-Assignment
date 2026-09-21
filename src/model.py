@@ -207,10 +207,10 @@ class PersonSearchModel(nn.Module):
     # ------------------------------------------------------------------ #
 
     @torch.no_grad()
-    def _forward_eval(self, images: torch.Tensor) -> List[Dict[str, torch.Tensor]]:
+    def _forward_eval(self, images: torch.Tensor, pyramid=None) -> List[Dict[str, torch.Tensor]]:
         image_shapes = [tuple(images.shape[-2:])] * images.shape[0]
 
-        _, p_feats_list, p_feats_roi = self._extract_pyramid(images)
+        _, p_feats_list, p_feats_roi = self._extract_pyramid(images) if pyramid is None else pyramid
 
         image_list = make_image_list(images)
         anchors_per_image = self.anchor_gen(image_list, p_feats_list)

@@ -81,7 +81,7 @@ def embed_detected_crops(model, image_path, boxes, device, batch_size=32):
 def evaluate_prw(model, root, device, batch_size=2, max_queries=None, max_gallery=None,
                  score_threshold=.5, iou_threshold=.5, return_records=False,
                  table_queries=100, table_top_k=5, query_batch_size=64,
-                 ranking_batch_size=8, gallery_crop_batch_size=32, gallery_mode="detected", detector_image_size=(256, 384)):
+                 ranking_batch_size=8, gallery_crop_batch_size=32, gallery_mode="detected", detector_image_size=(256, 384), gallery_embedding_mode="crop"):
 
 
     
@@ -130,6 +130,8 @@ def evaluate_prw(model, root, device, batch_size=2, max_queries=None, max_galler
     if (len(detector_image_size) != 2 or
         any(not isinstance(v, int) or isinstance(v, bool) or v <= 0 for v in detector_image_size)):
         raise ValueError("detector_image_size must be two positive integers (height, width)")
+    if gallery_embedding_mode not in ("crop", "scene"):
+        raise ValueError("gallery_embedding_mode must be crop or scene")
     root = Path(root)
     split = _load_mat_table(root / "frame_test.mat")
     # frame_test.mat contains a MATLAB string array under this key.
@@ -165,11 +167,16 @@ def evaluate_prw(model, root, device, batch_size=2, max_queries=None, max_galler
                            for boxes, ids in targets]
             else:
                 results = model(torch.stack(tensors).to(device))
+            if gallery_mode == "gt" and gallery_embedding_mode == "scene":
+                emb = model.embed_scene(torch.stack(tensors).to(device), [b.to(device) for b, _ in targets])
+                for result, e in zip(results, emb.split([len(b) for b, _ in targets])):
+                    result['embeddings'] = e
             for name, result, target, scale in zip(batch_names, results, targets, scales):
                 result = {key: value.cpu() for key, value in result.items()}
-                result["embeddings"] = embed_detected_crops(
-                    model, root / "frames" / f"{name}.jpg",
-                    result["boxes"] / scale, device, gallery_crop_batch_size)
+                if gallery_embedding_mode == "crop":
+                    result["embeddings"] = embed_detected_crops(
+                        model, root / "frames" / f"{name}.jpg",
+                        result["boxes"] / scale, device, gallery_crop_batch_size)
                 gallery.append({"frame": name, "result": result, "target": target, "scale": scale})
             if len(gallery) % 500 < batch_size:
                 print(f"PRW evaluation: embedded {len(gallery)}/{len(names)} gallery frames", flush=True)

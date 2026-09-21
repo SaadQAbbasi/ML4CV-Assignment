@@ -6,7 +6,7 @@ from prw_evaluation import _image_tensor, _load_gallery_target, embed_detected_c
 
 
 @torch.inference_mode()
-def build_validation_gallery(model, root, frame_names, device, score_threshold=.5):
+def build_validation_gallery(model, root, frame_names, device, score_threshold=.5, detector_image_size=(256,384)):
     """Cache boxes only; every evaluation recomputes embeddings. No test files read."""
     names = list(dict.fromkeys(frame_names))
     gallery = []
@@ -15,7 +15,7 @@ def build_validation_gallery(model, root, frame_names, device, score_threshold=.
     model.det_score_thresh = score_threshold
     try:
         for name in names:
-            image, scale = _image_tensor(Path(root), name)
+            image, scale = _image_tensor(Path(root), name, size=detector_image_size)
             result = model(image[None].to(device))[0]
             gt, ids = _load_gallery_target(Path(root), name)
             gallery.append(dict(frame=name, boxes=result['boxes'].detach().cpu()/scale,
@@ -28,7 +28,7 @@ def build_validation_gallery(model, root, frame_names, device, score_threshold=.
                                         for k,h in enumerate(gallery) if k != i)]
     if not queries:
         raise ValueError('Validation gallery has no cross-frame query identities')
-    return dict(gallery=gallery, queries=queries, score_threshold=score_threshold)
+    return dict(gallery=gallery, queries=queries, score_threshold=score_threshold, detector_image_size=detector_image_size)
 
 
 def rank_validation(matrix, query_embeddings, gallery, queries, iou_threshold=.5):
@@ -64,14 +64,18 @@ def rank_validation(matrix, query_embeddings, gallery, queries, iou_threshold=.5
 
 
 @torch.inference_mode()
-def evaluate_validation_gallery(model, root, cache, device, crop_batch_size=32):
+def evaluate_validation_gallery(model, root, cache, device, crop_batch_size=32, gallery_embedding_mode="crop"):
     mode = model.training
     model.eval()
     features, query_features = [], {}
     try:
         for i,g in enumerate(cache['gallery']):
             path = Path(root)/'frames'/f"{g['frame']}.jpg"
-            features.append(embed_detected_crops(model,path,g['boxes'],device,crop_batch_size))
+            if gallery_embedding_mode == 'scene':
+                image,scale=_image_tensor(Path(root),g['frame'],size=cache['detector_image_size'])
+                features.append(model.embed_scene(image[None].to(device),[(g['boxes']*scale).to(device)]).cpu())
+            else:
+                features.append(embed_detected_crops(model,path,g['boxes'],device,crop_batch_size))
             indices = sorted({j for source,j in cache['queries'] if source==i})
             if indices:
                 emb = embed_detected_crops(model,path,g['gt'][indices],device,crop_batch_size)
