@@ -6,7 +6,7 @@ Given a crop of a person, **find every other appearance of that person** in 6,11
 
 The final system pairs a fine-tuned **Swin-T Faster R-CNN** detector with a separate **DINOv3 ViT-S/16** ReID encoder. It reaches **54.1 mAP / 86.5 top-1** on the PRW test set with the official `eval_search_prw`, which is in the range of published end-to-end methods such as COAT (≈ 53 / 87).
 
-▶ **[Run it on Kaggle](https://www.kaggle.com/code/saadqasimabbasi/prw-person-search-evaluation)**: no setup, no secrets. Click *Copy & Edit* and then *Run All*. [`main.ipynb`](main.ipynb) contains the full run with all outputs.
+▶ **[Run it on Kaggle](https://www.kaggle.com/code/saadqasimabbasi/prw-person-search-evaluation)**: no setup, no secrets. Click *Copy & Edit* and then *Run All*. [`main.ipynb`](main.ipynb) contains the full run with all outputs. If GitHub does not display it, [view it on nbviewer](https://nbviewer.org/github/SaadQAbbasi/ML4CV-Assignment/blob/main/main.ipynb).
 
 ## The final pipeline
 
