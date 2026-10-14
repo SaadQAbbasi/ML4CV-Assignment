@@ -1,9 +1,12 @@
-# Install CUDA PyTorch first; see TRAINING.md.
+# Only needed to run the code locally; the Kaggle image already provides these packages.
+# Install CUDA PyTorch first (see README.md).
 torch==2.11.0
 torchvision==0.26.0
 wandb>=0.21,<1
 matplotlib>=3.10,<4
 scipy>=1.16,<2
+scikit-learn>=1.5,<2
+pandas>=2.2,<3
 ipykernel>=6.30,<8
 nbclient>=0.10,<1
 nbformat>=5.10,<6

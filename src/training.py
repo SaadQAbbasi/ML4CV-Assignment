@@ -25,7 +25,8 @@ def start_run(config, name='person-search', mode=None):
     run = wandb.init(project=os.environ.get('WANDB_PROJECT', 'person-search'),
                      entity=os.environ.get('WANDB_ENTITY') or None,
                      name=name, config=config, mode=mode,
-                     dir=str(Path(__file__).resolve().parents[1]),
+                     # WANDB_DIR lets read-only code locations (Kaggle inputs) log elsewhere.
+                     dir=os.environ.get('WANDB_DIR', str(Path(__file__).resolve().parents[1])),
                      settings=wandb.Settings(init_timeout=60))
     run.define_metric('train/step')
     run.define_metric('epoch')

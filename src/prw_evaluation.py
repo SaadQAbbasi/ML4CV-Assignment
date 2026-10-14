@@ -81,11 +81,15 @@ def embed_detected_crops(model, image_path, boxes, device, batch_size=32):
 def evaluate_prw(model, root, device, batch_size=2, max_queries=None, max_gallery=None,
                  score_threshold=.5, iou_threshold=.5, return_records=False,
                  table_queries=100, table_top_k=5, query_batch_size=64,
-                 ranking_batch_size=8, gallery_crop_batch_size=32, gallery_mode="detected", detector_image_size=(256, 384), gallery_embedding_mode="crop"):
-
-
-    
+                 ranking_batch_size=8, gallery_crop_batch_size=32, gallery_mode="detected",
+                 detector_image_size=(256, 384), gallery_embedding_mode="crop", official_eval=False):
     """Evaluate cosine retrieval over PRW test frames.
+
+    With ``official_eval=True`` the same gallery/query embeddings are also scored by
+    the official ``eval_search_prw`` (see ``official_evaluation.py``); its results are
+    returned as ``official_mAP`` / ``official_top1`` and are the numbers to report.
+    ``retrieval_mAP`` / ``retrieval_top1`` come from the in-house GPU ranking below,
+    which also produces the per-query records used for qualitative plots.
 
     detector_image_size is the scene (height, width) resize/padding canvas;
     pass the detector checkpoint's saved image_size. Person crop size is separate
@@ -122,8 +126,9 @@ def evaluate_prw(model, root, device, batch_size=2, max_queries=None, max_galler
     ranking_batch_size : int
         Number of queries to rank against the gallery at once. Each query is a single person.
     gallery_crop_batch_size : int
-        Number of detected gallery crops to embed at once. Each crop is a single person.    
-
+        Number of detected gallery crops to embed at once. Each crop is a single person.
+    official_eval : bool
+        If True, also compute ``official_mAP`` / ``official_top1`` with ``eval_search_prw``.
     """
     if gallery_mode not in ("detected", "gt"):
         raise ValueError("gallery_mode must be 'detected' or 'gt'")
@@ -365,6 +370,16 @@ def evaluate_prw(model, root, device, batch_size=2, max_queries=None, max_galler
         "retrieval_gallery_frames": len(gallery),
         "retrieval_detections": sum(len(e["result"]["boxes"]) for e in gallery),
     }
+    if official_eval:
+        from official_evaluation import official_search_metrics
+        official_started = perf_counter()
+        print("PRW evaluation: scoring with the official eval_search_prw", flush=True)
+        metrics.update(official_search_metrics(
+            gallery, query_items, query_embeddings,
+            det_thresh=score_threshold if score_threshold is not None else threshold,
+            image_root=root / "frames"))
+        print(f"PRW evaluation: official scoring finished in "
+              f"{perf_counter() - official_started:.1f}s", flush=True)
     if return_records:
         metrics["retrieval_records"] = records
     return metrics

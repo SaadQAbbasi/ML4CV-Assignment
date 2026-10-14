@@ -63,6 +63,8 @@ def load_system(spec, detector_path, device):
         detector=PersonSearchModel(**config)
         detector.load_state_dict(det['model_state_dict'],strict=True)
         rc=dict(state['reid_config']);rc['pretrained']=False
+        # Optional local copy of the DINOv3 code (no Internet needed); weights come from the checkpoint.
+        if spec.get('dinov3_repo'):rc['hub_repo']=str(spec['dinov3_repo'])
         model=DinoPersonSearch(detector,DinoV3CropReID(**rc))
         model.reid_head.load_state_dict(state['reid_state_dict'],strict=True)
         image_size=tuple(det.get('detector_image_size',det['run_config']['image_size']))

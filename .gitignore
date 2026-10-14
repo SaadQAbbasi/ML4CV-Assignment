@@ -7,3 +7,4 @@ wandb/
 checkpoints/
 artifacts/
 .ipynb_checkpoints/
+kaggle_upload/

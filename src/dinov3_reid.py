@@ -19,7 +19,9 @@ class DinoV3CropReID(nn.Module):
                 if weights_path is None or not Path(weights_path).is_file():
                     raise ValueError('Provide a downloaded official DINOv3 ViT-S/16 weights_path')
                 kwargs['weights'] = str(weights_path)
-            backbone = torch.hub.load(hub_repo, 'dinov3_vits16', **kwargs)
+            # hub_repo is either a GitHub reference or a local copy of the DINOv3 repository.
+            source = 'local' if Path(hub_repo).is_dir() else 'github'
+            backbone = torch.hub.load(hub_repo, 'dinov3_vits16', source=source, **kwargs)
         self.backbone = backbone.requires_grad_(False).eval()
         self.train_last_blocks = train_last_blocks
         if train_last_blocks < 0 or (train_last_blocks and train_last_blocks > len(backbone.blocks)):
