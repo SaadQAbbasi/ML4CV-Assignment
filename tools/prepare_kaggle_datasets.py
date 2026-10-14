@@ -19,6 +19,12 @@ Upload them as public datasets with the Kaggle CLI (``--dir-mode zip`` keeps ``d
 
     kaggle datasets create -p kaggle_upload/code --dir-mode zip --public
     kaggle datasets create -p kaggle_upload/weights --public
+
+A third dataset, ``saadqasimabbasi/prw-person-search-results``, holds the saved outputs of the
+full four-system run (``metrics.csv``, ``provenance.json``, ``retrieval-*.json``,
+``visualization_*``) so ``main.ipynb`` only needs to re-evaluate the systems in
+``RERUN_SYSTEMS``. Copy those files from a full run's ``final_prw_comparison`` folder into
+``kaggle_upload/results`` (with a ``dataset-metadata.json``) and upload it the same way.
 """
 import argparse
 import io

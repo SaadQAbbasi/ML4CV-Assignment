@@ -98,21 +98,22 @@ The notebook is designed to run **on Kaggle** and needs no accounts, tokens or s
 
 1. Open the link above and click **Copy & Edit**.
 2. Settings: **Accelerator → GPU T4 ×1** (or P100). Internet is not required.
-3. **Run All.** The full evaluation of the four systems takes about 1 h 55 min on a T4.
+3. **Run All.** This takes about 30 min on a T4. By default only the final system (Swin + DINO) is evaluated live on the full test set. The other three systems load the saved outputs of a full run of all four systems (the *Saved results* input). To re-evaluate them too, add their names to `RERUN_SYSTEMS` in section 2.2 (about 28 min each, 1 h 55 min for all four).
 
 The submitted `main.ipynb` already contains every output of that full run, so it can be read without being run.
 
-**Quick run (optional).** To check that the notebook runs end to end without waiting for the full evaluation, open the configuration cell in section 2.2, set `QUICK_RUN = True` and then *Run All*. Every system is evaluated on only the first `QUICK_GALLERY_FRAMES = 300` test frames, and every section still produces its tables and figures. The quick-run mAP / top-1 are **not** comparable to the reported results. Those come from the full run with `QUICK_RUN = False`, which is the default.
+**Quick run (optional).** To check that the notebook runs end to end without waiting for the full evaluation, open the configuration cell in section 2.2, set `QUICK_RUN = True` and then *Run All*. Every live system is evaluated on only the first `QUICK_GALLERY_FRAMES = 300` test frames, and every section still produces its tables and figures. The quick-run mAP / top-1 are **not** comparable to the reported results. Those come from the full run with `QUICK_RUN = False`, which is the default.
 
-To start instead from `main.ipynb`: create a new Kaggle notebook, use *File → Import Notebook*, and attach these three public datasets with *Add Input*:
+To start instead from `main.ipynb`: create a new Kaggle notebook, use *File → Import Notebook*, and attach these four public datasets with *Add Input*:
 
 | Input | Kaggle dataset | Content |
 |---|---|---|
 | PRW dataset | [`edoardomerli/prw-person-re-identification-in-the-wild`](https://www.kaggle.com/datasets/edoardomerli/prw-person-re-identification-in-the-wild) | frames, annotations, queries |
 | Code | [`saadqasimabbasi/prw-person-search-code`](https://www.kaggle.com/datasets/saadqasimabbasi/prw-person-search-code) | the `src/` modules + a DINOv3 code snapshot |
 | Weights | [`saadqasimabbasi/prw-person-search-weights`](https://www.kaggle.com/datasets/saadqasimabbasi/prw-person-search-weights) | the five trained checkpoints |
+| Saved results | [`saadqasimabbasi/prw-person-search-results`](https://www.kaggle.com/datasets/saadqasimabbasi/prw-person-search-results) | metrics, top-5 retrievals of the first 100 queries and diagnostic embeddings from the full run of all four systems |
 
-The notebook finds the three inputs automatically, wherever Kaggle mounts them under `/kaggle/input`. Results (CSV, JSON, PNG) are written to `/kaggle/working/final_prw_comparison`.
+The notebook finds the four inputs automatically, wherever Kaggle mounts them under `/kaggle/input`. Results (CSV, JSON, PNG) are written to `/kaggle/working/final_prw_comparison`.
 
 ## Model weights
 

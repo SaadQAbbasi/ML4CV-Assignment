@@ -10,6 +10,7 @@ import wandb
 from PIL import Image
 from torchvision.ops import box_iou
 from torchvision.transforms.functional import normalize, pil_to_tensor, resize
+from tqdm.auto import tqdm
 
 from prw_dataset import _load_mat_table, _mat_strings, preprocess_query_crop
 
@@ -117,8 +118,8 @@ def evaluate_prw(model, root, device, batch_size=2, max_queries=None, max_galler
         Minimum IoU between a gallery detection and a same-ID annotation to count as relevant.
     return_records : bool
         If True, return a list of query records with ranked retrieval results.
-    table_queries : int
-        Maximum number of query records to save for W&B table and plotting.
+    table_queries : int or None
+        Maximum number of query records to save for W&B table and plotting. None means all queries.
     table_top_k : int
         Maximum number of ranked retrievals to save for W&B table and plotting.
     query_batch_size : int
@@ -152,8 +153,8 @@ def evaluate_prw(model, root, device, batch_size=2, max_queries=None, max_galler
     threshold = model.det_score_thresh
     if score_threshold is not None:
         model.det_score_thresh = score_threshold
+    progress = tqdm(total=len(names), desc=f"Gallery frames ({gallery_mode})", unit="frame")
     try:
-        gallery_started = perf_counter()
         for start in range(0, len(names), batch_size):
             batch_names = names[start:start + batch_size]
             tensors = []
@@ -183,16 +184,13 @@ def evaluate_prw(model, root, device, batch_size=2, max_queries=None, max_galler
                         model, root / "frames" / f"{name}.jpg",
                         result["boxes"] / scale, device, gallery_crop_batch_size)
                 gallery.append({"frame": name, "result": result, "target": target, "scale": scale})
-            if len(gallery) % 500 < batch_size:
-                print(f"PRW evaluation: embedded {len(gallery)}/{len(names)} gallery frames", flush=True)
+            progress.update(len(batch_names))
     finally:
+        progress.close()
         model.det_score_thresh = threshold
-    print(f"PRW evaluation: gallery embedding finished in "
-          f"{perf_counter() - gallery_started:.1f}s", flush=True)
 
     # Match each detection to GT once. The previous implementation repeated
     # this IoU work for every query, resulting in millions of tiny CPU calls.
-    print("PRW evaluation: matching detections to gallery ground truth", flush=True)
     frame_to_index = {entry["frame"]: index for index, entry in enumerate(gallery)}
     gt_counts = Counter()
     frame_gt_boxes = {}
@@ -262,15 +260,12 @@ def evaluate_prw(model, root, device, batch_size=2, max_queries=None, max_galler
             query_items.append((query, crop_path, _load_query_crop(crop_path, getattr(getattr(model, "reid_head", None), "crop_size", (128, 64)))))
 
     query_embeddings = []
-    query_started = perf_counter()
-    for start in range(0, len(query_items), query_batch_size):
+    for start in tqdm(range(0, len(query_items), query_batch_size), desc="Query crops",
+                      unit="batch", leave=False):
         batch_items = query_items[start:start + query_batch_size]
         crops = torch.stack([item[2] for item in batch_items]).to(device)
         embeddings = model.embed_crop(crops).cpu()
         query_embeddings.extend(embeddings.unbind())
-        print(f"PRW evaluation: embedded {len(query_embeddings)}/{len(query_items)} queries", flush=True)
-    print(f"PRW evaluation: query embedding finished in "
-          f"{perf_counter() - query_started:.1f}s", flush=True)
 
     average_precisions = []
     top1_hits = []
@@ -280,10 +275,10 @@ def evaluate_prw(model, root, device, batch_size=2, max_queries=None, max_galler
         detection_ids_device = detection_ids.to(device)
         detection_frames_device = detection_frames.to(device)
         detection_gt_keys_device = detection_gt_keys.to(device)
-        ranking_started = perf_counter()
         print(f"PRW evaluation: ranking {len(query_items)} queries against "
               f"{len(detection_embeddings)} detections", flush=True)
-        for start in range(0, len(query_items), ranking_batch_size):
+        for start in tqdm(range(0, len(query_items), ranking_batch_size), desc="Ranking",
+                          unit="batch", leave=False):
             end = min(start + ranking_batch_size, len(query_items))
             query_batch = torch.stack(query_embeddings[start:end]).to(device)
             score_batch = query_batch @ gallery_embeddings_device.T
@@ -313,7 +308,7 @@ def evaluate_prw(model, root, device, batch_size=2, max_queries=None, max_galler
                     average_precisions.append(float((hit_numbers / positive_ranks).sum() / total_gt_relevant))
                     top1_hits.append(int(bool(len(positive_ranks) and positive_ranks[0] == 1)))
 
-                if return_records and len(records) < table_queries:
+                if return_records and (table_queries is None or len(records) < table_queries):
                     positive_rank_set = set(positive_rank_indices)
                     ranked = []
                     valid_order = order[valid[order]]
@@ -332,9 +327,6 @@ def evaluate_prw(model, root, device, batch_size=2, max_queries=None, max_galler
                         "query_path": str(crop_path),
                         "ground_truth_count": total_gt_relevant, "ranked": ranked,
                     })
-            print(f"PRW evaluation: ranked {end}/{len(query_items)} queries", flush=True)
-        print(f"PRW evaluation: ranking finished in "
-              f"{perf_counter() - ranking_started:.1f}s", flush=True)
 
     # Include queries with relevant GT even when the detector returns no boxes.
     if not len(detection_embeddings):
@@ -373,7 +365,8 @@ def evaluate_prw(model, root, device, batch_size=2, max_queries=None, max_galler
     if official_eval:
         from official_evaluation import official_search_metrics
         official_started = perf_counter()
-        print("PRW evaluation: scoring with the official eval_search_prw", flush=True)
+        print("PRW evaluation: scoring with the official eval_search_prw "
+              "(no progress bar; a few minutes on the full test set)", flush=True)
         metrics.update(official_search_metrics(
             gallery, query_items, query_embeddings,
             det_thresh=score_threshold if score_threshold is not None else threshold,
