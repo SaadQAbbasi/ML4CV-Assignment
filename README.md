@@ -1,7 +1,5 @@
 # Person Search on PRW: Swin-T detector + DINOv3 ReID
 
-**Student:** `<FULL NAME>` · `<STUDENT_ID>` · `<name.surname@studio.unibo.it>` · ML4CV assignment, University of Bologna
-
 Given a crop of a person, **find every other appearance of that person** in 6,112 full frames from six campus cameras (the [PRW dataset](https://github.com/liangzheng06/PRW-baseline)). A system has to *detect* every person in every frame and *re-identify* them, ranking the detections by their similarity to the query.
 
 The final system pairs a fine-tuned **Swin-T Faster R-CNN** detector with a separate **DINOv3 ViT-S/16** ReID encoder. It reaches **54.1 mAP / 86.5 top-1** on the PRW test set with the official `eval_search_prw`, which is in the range of published end-to-end methods such as COAT (≈ 53 / 87).
@@ -161,16 +159,4 @@ python3 -m venv .venv
 PYTHONPATH=src .venv/bin/python -m unittest discover -s tests     # unit tests, no data needed
 ```
 
-To run a notebook outside Kaggle, point `PRW_INPUT_ROOT` at a folder that contains the PRW dataset, `src/` and the checkpoints, and set `PRW_WORKING` to an output folder.
-
-## Publishing the datasets (author only)
-
-From the repository root, with W&B access and the [Kaggle CLI](https://github.com/Kaggle/kaggle-api) configured:
-
-```bash
-.venv/bin/python tools/prepare_kaggle_datasets.py --kaggle-user <kaggle-user>
-kaggle datasets create -p kaggle_upload/code --dir-mode zip --public     # later updates: kaggle datasets version ...
-kaggle datasets create -p kaggle_upload/weights --public
-```
-
-The code dataset includes a snapshot of [facebookresearch/dinov3](https://github.com/facebookresearch/dinov3) (DINOv3 license) so the architecture loads without Internet.
+To run a training notebook outside Kaggle, point `PRW_INPUT_ROOT` at a folder that contains the PRW dataset, `src/` and the checkpoints, and set `PRW_WORKING` to an output folder.
