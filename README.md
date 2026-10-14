@@ -4,7 +4,7 @@ Given a crop of a person, **find every other appearance of that person** in 6,11
 
 The final system pairs a fine-tuned **Swin-T Faster R-CNN** detector with a separate **DINOv3 ViT-S/16** ReID encoder. It reaches **54.1 mAP / 86.5 top-1** on the PRW test set with the official `eval_search_prw`, which is in the range of published end-to-end methods such as COAT (≈ 53 / 87).
 
-▶ **[Run it on Kaggle](https://www.kaggle.com/code/saadqasimabbasi/prw-person-search-evaluation)**: no setup, no secrets. Click *Copy & Edit* and then *Run All*. [`main.ipynb`](main.ipynb) contains the full run with all outputs. If GitHub does not display it, [view it on nbviewer](https://nbviewer.org/github/SaadQAbbasi/ML4CV-Assignment/blob/main/main.ipynb).
+▶ **[Run it on Kaggle](https://www.kaggle.com/code/saadqasimabbasi/person-search-in-wild)**: no setup, no secrets. Click *Copy & Edit* and then *Run All*. [`main.ipynb`](main.ipynb) contains the full run with all outputs. If GitHub does not display it, [view it on nbviewer](https://nbviewer.org/github/SaadQAbbasi/ML4CV-Assignment/blob/main/main.ipynb).
 
 ## The final pipeline
 
@@ -94,7 +94,7 @@ offline_mining.py          P×K sampler with optional hard-identity mining
 
 The notebook is designed to run **on Kaggle** and needs no accounts, tokens or secrets.
 
-**Public Kaggle notebook (inputs already attached):** https://www.kaggle.com/code/saadqasimabbasi/prw-person-search-evaluation
+**Public Kaggle notebook (inputs already attached):** https://www.kaggle.com/code/saadqasimabbasi/person-search-in-wild
 
 1. Open the link above and click **Copy & Edit**.
 2. Settings: **Accelerator → GPU T4 ×1** (or P100). Internet is not required.
