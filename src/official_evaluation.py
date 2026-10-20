@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import torch
 from torch.nn import functional as F
+from tqdm import tqdm
 
 from eval_function import eval_search_prw
 
@@ -24,6 +25,23 @@ class SearchDataset:
 
     def __len__(self):
         return len(self.annotations)
+
+
+class _ProgressList(list):
+    """List that advances a progress bar each time one item is read.
+
+    ``eval_search_prw`` reads ``query_box_feats[i]`` exactly once per query, so
+    passing the query features in this list shows its progress without modifying it.
+    """
+
+    def __init__(self, items, progress):
+        super().__init__(items)
+        self.progress = progress
+
+    def __getitem__(self, index):
+        if isinstance(index, int):
+            self.progress.update(1)
+        return super().__getitem__(index)
 
 
 @dataclass
@@ -115,9 +133,11 @@ def official_search_metrics(gallery, query_items, query_embeddings, det_thresh, 
             if frames_by_identity.get(query["identity"], set()) - {query["frame"]}]
     inputs = build_official_inputs(gallery, [query_items[i] for i in kept],
                                    [query_embeddings[i] for i in kept], image_root)
-    result = eval_search_prw(inputs.gallery_dataset, inputs.query_dataset,
-                             inputs.gallery_dets, inputs.gallery_feats,
-                             inputs.query_box_feats, det_thresh=det_thresh)
+    # Plain-text bar refreshed every 10 s, like the other evaluation bars.
+    with tqdm(total=len(kept), desc="Official scoring", unit="query", mininterval=10) as progress:
+        result = eval_search_prw(inputs.gallery_dataset, inputs.query_dataset,
+                                 inputs.gallery_dets, inputs.gallery_feats,
+                                 _ProgressList(inputs.query_box_feats, progress), det_thresh=det_thresh)
     return {
         "official_mAP": float(result["mAP"]),
         "official_top1": float(result["accs"][0]),

@@ -1,6 +1,7 @@
 """PRW gallery/query retrieval evaluation for the person-search model."""
 
 from collections import Counter
+from functools import partial
 from pathlib import Path
 from time import perf_counter
 
@@ -10,10 +11,13 @@ import wandb
 from PIL import Image
 from torchvision.ops import box_iou
 from torchvision.transforms.functional import normalize, pil_to_tensor, resize
-from tqdm.auto import tqdm
+from tqdm import tqdm as _tqdm
 
 from prw_dataset import _load_mat_table, _mat_strings, preprocess_query_crop
 
+# Plain-text progress bars, refreshed every 10 s: notebook widget bars do not appear in Kaggle's run log
+# and are saved in the notebook as "0%".
+tqdm = partial(_tqdm, mininterval=10)
 
 def _load_query_info(path: Path):
     queries = []
@@ -366,7 +370,7 @@ def evaluate_prw(model, root, device, batch_size=2, max_queries=None, max_galler
         from official_evaluation import official_search_metrics
         official_started = perf_counter()
         print("PRW evaluation: scoring with the official eval_search_prw "
-              "(no progress bar; a few minutes on the full test set)", flush=True)
+              "(a few minutes on the full test set)", flush=True)
         metrics.update(official_search_metrics(
             gallery, query_items, query_embeddings,
             det_thresh=score_threshold if score_threshold is not None else threshold,

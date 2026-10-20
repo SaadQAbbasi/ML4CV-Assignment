@@ -4,7 +4,7 @@ Given a crop of a person, **find every other appearance of that person** in 6,11
 
 The final system pairs a fine-tuned **Swin-T Faster R-CNN** detector with a separate **DINOv3 ViT-S/16** ReID encoder. It reaches **54.1 mAP / 86.5 top-1** on the PRW test set with the official `eval_search_prw`, which is in the range of published end-to-end methods such as COAT (≈ 53 / 87).
 
-▶ **[Run it on Kaggle](https://www.kaggle.com/code/saadqasimabbasi/person-search-in-wild)**: no setup, no secrets. Click *Copy & Edit* and then *Run All*. [`main.ipynb`](main.ipynb) contains the full run with all outputs. If GitHub does not display it, [view it on nbviewer](https://nbviewer.org/github/SaadQAbbasi/ML4CV-Assignment/blob/main/main.ipynb).
+▶ **[Run it on Kaggle](https://www.kaggle.com/code/saadqasimabbasi/prw-search)**: no setup, no secrets. Click *Copy & Edit* and then *Run All*. [`main.ipynb`](main.ipynb) contains the full run with all outputs. If GitHub does not display it, [view it on nbviewer](https://nbviewer.org/github/SaadQAbbasi/ML4CV-Assignment/blob/main/main.ipynb).
 
 ## The final pipeline
 
@@ -65,7 +65,6 @@ tests/              unit tests (unittest)
 tools/              prepare_kaggle_datasets.py: builds the Kaggle code/weights datasets (author only)
 docs/diagrams/      pipeline diagram of each system (draw.io source + PNG)
 docs/images/        figures from main.ipynb used in this README
-TRAINING.md         chronological log of every experiment, including the ones not kept
 requirements.txt    packages for running the code locally
 ```
 
@@ -94,7 +93,7 @@ offline_mining.py          P×K sampler with optional hard-identity mining
 
 The notebook is designed to run **on Kaggle** and needs no accounts, tokens or secrets.
 
-**Public Kaggle notebook (inputs already attached):** https://www.kaggle.com/code/saadqasimabbasi/person-search-in-wild
+**Public Kaggle notebook (inputs already attached):** https://www.kaggle.com/code/saadqasimabbasi/prw-search
 
 1. Open the link above and click **Copy & Edit**.
 2. Settings: **Accelerator → GPU T4 ×1** (or P100). Internet is not required.
@@ -104,7 +103,7 @@ The submitted `main.ipynb` already contains every output of that full run, so it
 
 **Quick run (optional).** To check that the notebook runs end to end without waiting for the full evaluation, open the configuration cell in section 2.2, set `QUICK_RUN = True` and then *Run All*. Every live system is evaluated on only the first `QUICK_GALLERY_FRAMES = 300` test frames, and every section still produces its tables and figures. The quick-run mAP / top-1 are **not** comparable to the reported results. Those come from the full run with `QUICK_RUN = False`, which is the default.
 
-To start instead from `main.ipynb`: create a new Kaggle notebook, use *File → Import Notebook*, and attach these four public datasets with *Add Input*:
+To start instead from `main.ipynb`: create a new Kaggle notebook, use *File → Import Notebook*, and attach these five public datasets with *Add Input*:
 
 | Input | Kaggle dataset | Content |
 |---|---|---|
@@ -112,8 +111,9 @@ To start instead from `main.ipynb`: create a new Kaggle notebook, use *File → 
 | Code | [`saadqasimabbasi/prw-person-search-code`](https://www.kaggle.com/datasets/saadqasimabbasi/prw-person-search-code) | the `src/` modules + a DINOv3 code snapshot |
 | Weights | [`saadqasimabbasi/prw-person-search-weights`](https://www.kaggle.com/datasets/saadqasimabbasi/prw-person-search-weights) | the five trained checkpoints |
 | Saved results | [`saadqasimabbasi/prw-person-search-results`](https://www.kaggle.com/datasets/saadqasimabbasi/prw-person-search-results) | metrics, top-5 retrievals of the first 100 queries and diagnostic embeddings from the full run of all four systems |
+| PRW test archive (optional, faster) | [`saadqasimabbasi/prw-person-search-test-archive`](https://www.kaggle.com/datasets/saadqasimabbasi/prw-person-search-test-archive) | the PRW test split packed in one file, unpacked to local disk at the start: Kaggle can be very slow to read the ~14,000 small PRW files one by one |
 
-The notebook finds the four inputs automatically, wherever Kaggle mounts them under `/kaggle/input`. Results (CSV, JSON, PNG) are written to `/kaggle/working/final_prw_comparison`.
+The notebook finds the inputs automatically, wherever Kaggle mounts them under `/kaggle/input`. Results (CSV, JSON, PNG) are written to `/kaggle/working/final_prw_comparison`.
 
 ## Model weights
 
@@ -148,8 +148,6 @@ Each notebook in `training/` reproduces one published checkpoint on a Kaggle T4.
 | `04_dinov3_reid` | `joint_swin_t_triplet.pt`, DINOv3 ViT-S/16 pretrained weights | `swin_dino_reid.pt` | ≈ 2.7 h |
 
 Each notebook starts with what it trains, its full configuration, and how the published checkpoint was selected. `04_dinov3_reid` needs Meta's pretrained `dinov3_vits16_pretrain_lvd1689m-08c60483.pth`. It is distributed under the DINOv3 license, so download it from the [DINOv3 repository](https://github.com/facebookresearch/dinov3) and upload it as a private Kaggle dataset. Exact numbers can differ slightly between runs because GPU training is not bit-wise deterministic.
-
-`TRAINING.md` records every experiment chronologically, including the variants that were tried and discarded: losses, DINOv2/DINOv3 poolings, hard mining and so on.
 
 ## Running locally (optional)
 
