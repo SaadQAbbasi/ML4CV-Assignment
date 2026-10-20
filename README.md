@@ -131,23 +131,22 @@ Each file is the exact W&B artifact version listed in the `main.ipynb` manifest,
 
 ## Retraining the models
 
-Each notebook in `training/` reproduces one published checkpoint on a Kaggle T4. Like `main.ipynb`, they locate their inputs under `/kaggle/input` automatically. W&B logging is off unless you set `USE_WANDB = True`. The notebooks depend on each other's outputs: attach a notebook's output as an input of the next one with *Add Input → Notebook Output*.
+Not needed to run `main.ipynb`: the trained weights are already published. To rebuild them, run the notebooks in `training/` on a Kaggle T4. Notebooks 01 and 03 are run twice, with a different setting at the top.
 
-```
-01_joint_person_search ──► resnet_baseline.pt                       (CONFIG = "resnet_baseline")
-                       └─► joint_swin_t_triplet.pt ──┬─► 02_swin_detector ──► swin_detector.pt ──► 03_swin_reid ──► swin_single_pass.pt
-                           (CONFIG = "joint_swin_t_   │                                                         └─► swin_two_pass.pt
-                            triplet")                 └─► 04_dinov3_reid ──► swin_dino_reid.pt  (validation detector)
-```
+| Run | Notebook and setting | Starts from | Produces | Time (T4) |
+|---|---|---|---|---|
+| 1 | `01_joint_person_search`, `CONFIG = "resnet_baseline"` | ImageNet | `resnet_baseline.pt` (ResNet baseline) | ≈ 3.1 h |
+| 2 | `01_joint_person_search`, `CONFIG = "joint_swin_t_triplet"` | ImageNet | `joint_swin_t_triplet.pt` (intermediate, used by runs 3 and 6) | ≈ 2.6 h |
+| 3 | `02_swin_detector` | run 2 | `swin_detector.pt` (detector used in `main.ipynb` by runs 4, 5 and 6) | ≈ 4 h |
+| 4 | `03_swin_reid`, `STRATEGY = "crop_to_scene"` | run 3, frozen | `swin_single_pass.pt` (Swin single-pass) | ≈ 5.3 h |
+| 5 | `03_swin_reid`, `STRATEGY = "crop_to_crop"` | run 3, frozen | `swin_two_pass.pt` (Swin two-pass) | ≈ 2.9 h |
+| 6 | `04_dinov3_reid` | pretrained DINOv3 ViT-S/16 | `swin_dino_reid.pt` (Swin + DINO) | ≈ 2.7 h |
 
-| Notebook | Inputs besides PRW + code | Output | Run time (T4) |
-|---|---|---|---|
-| `01_joint_person_search` | none | `resnet_baseline.pt` / `joint_swin_t_triplet.pt` | ≈ 3.1 h / 2.6 h |
-| `02_swin_detector` | `joint_swin_t_triplet.pt` | `swin_detector.pt` | ≈ 4 h |
-| `03_swin_reid` | `swin_detector.pt` (from 02 or the weights dataset) | `swin_single_pass.pt` / `swin_two_pass.pt` | ≈ 5.3 h / 2.9 h |
-| `04_dinov3_reid` | `joint_swin_t_triplet.pt`, DINOv3 ViT-S/16 pretrained weights | `swin_dino_reid.pt` | ≈ 2.7 h |
+**Which detector is used where.** The ResNet baseline uses its own ResNet-50 detector from run 1. There are two Swin-T detectors: the run-2 detector, trained together with re-identification at 256×384, and the run-3 detector, which starts from it and is trained for detection only at 512×768, so it is better. **At inference in `main.ipynb`, all three Swin systems (runs 4, 5 and 6) use the same run-3 detector.**
 
-Each notebook starts with what it trains, its full configuration, and how the published checkpoint was selected. `04_dinov3_reid` needs Meta's pretrained `dinov3_vits16_pretrain_lvd1689m-08c60483.pth`. It is distributed under the DINOv3 license, so download it from the [DINOv3 repository](https://github.com/facebookresearch/dinov3) and upload it as a private Kaggle dataset. Exact numbers can differ slightly between runs because GPU training is not bit-wise deterministic.
+**Why run 6 lists run 2.** The DINOv3 model was trained before run 3 existed. During training it learns only from ground-truth person crops, with no detector. After each epoch it is checked on the validation frames, where the run-2 detector finds the people; the epoch with the best validation mAP is kept. So run 2 only decides which epoch is saved and never changes what the model learns.
+
+To pass a run's output to a later run, use *Add Input → Notebook Output* in the later notebook. Run 6 also needs Meta's `dinov3_vits16_pretrain_lvd1689m-08c60483.pth`, from the [DINOv3 repository](https://github.com/facebookresearch/dinov3) (DINOv3 license), uploaded as a private Kaggle dataset. Results can differ slightly between runs, because GPU training is not bit-wise deterministic.
 
 ## Running locally (optional)
 
